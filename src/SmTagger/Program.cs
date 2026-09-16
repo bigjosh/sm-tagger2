@@ -15,7 +15,18 @@ public static class Program
                 throw new PlatformNotSupportedException("sm-tagger requires the approved Windows/NTFS deployment.");
             }
 
-            var invocation = Invocation.ParseTagger(args);
+            Invocation invocation;
+            try
+            {
+                invocation = Invocation.ParseTagger(args);
+            }
+            catch (ArgumentException exception)
+            {
+                ConsoleErrors.Write(Console.Error, "ERROR " + ConsoleErrors.Quote(exception.Message));
+                ConsoleErrors.Write(Console.Error, Invocation.TaggerUsage);
+                return 1;
+            }
+
             using var singleton = SingletonLock.Acquire(Path.Combine(invocation.DataDirectory, "sm-tagger.lock"));
             using var trace = TraceLog.Open(invocation.DataDirectory, invocation.Log);
             trace.Event("-", "STARTUP", "BEGIN", ("dataDirectory", invocation.DataDirectory),
@@ -41,11 +52,6 @@ public static class Program
         catch (Exception exception)
         {
             ConsoleErrors.WriteException(Console.Error, exception);
-            if (exception is ArgumentException)
-            {
-                ConsoleErrors.Write(Console.Error, "Usage: sm-tagger.exe <datadir> [-log] [-keep] <spooldir> [<basename>]");
-            }
-
             return 1;
         }
     }

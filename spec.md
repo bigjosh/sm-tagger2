@@ -129,6 +129,8 @@ sm-tagger.exe <datadir> [-log] [-keep] <spooldir> [<basename>]
 
 Tagger options must appear directly after `<datadir>` to avoid confusion with basenames that may start with a dash. The sorter has no options, persistent log, full EML parser, tag mapping, or sender-profile loader. Its diagnostics are the sorter-owned HDR suffix, a best-effort parent `.sort.err`, and standard error.
 
+An invalid argument count or other argument-validation error prints a concise error, one usage block, argument descriptions, and quoted-path examples to standard error, then exits with status 1 before acquiring a singleton or touching queue files. The hints explain that omitting `<basename>` starts watch mode and show the tagger option order.
+
 A command-line `<basename>` is one nonempty literal Windows filename component, not a path; leading hyphens are permitted. A value containing a separator, rooted/drive syntax, a reserved or otherwise unusable component spelling, or `.`/`..` is an invocation failure before any queue message is touched. Watch mode obtains basenames only from direct-directory enumeration.
 
 `-keep` accumulates files in `process\` that must be manually cleared.

@@ -14,7 +14,18 @@ public static class Program
                 throw new PlatformNotSupportedException("sm-sorter requires the approved Windows/NTFS deployment.");
             }
 
-            Invocation invocation = Invocation.ParseSorter(args);
+            Invocation invocation;
+            try
+            {
+                invocation = Invocation.ParseSorter(args);
+            }
+            catch (ArgumentException error)
+            {
+                ConsoleErrors.Write(Console.Error, "ERROR " + ConsoleErrors.Quote(error.Message));
+                ConsoleErrors.Write(Console.Error, Invocation.SorterUsage);
+                return 1;
+            }
+
             string inputDirectory = Path.Combine(invocation.SpoolDirectory, "proc");
             using SingletonLock singleton = SingletonLock.Acquire(Path.Combine(inputDirectory, "sm-sorter.lock"));
             SorterProcessor processor = new(invocation.DataDirectory, invocation.SpoolDirectory);
@@ -23,11 +34,6 @@ public static class Program
         catch (Exception error)
         {
             ConsoleErrors.WriteException(Console.Error, error);
-            if (error is ArgumentException)
-            {
-                ConsoleErrors.Write(Console.Error, "Usage: sm-sorter.exe <datadir> <spooldir> [<basename>]");
-            }
-
             return 1;
         }
     }

@@ -23,6 +23,35 @@ public sealed record Invocation(
     bool Log = false,
     bool Keep = false)
 {
+    public const string SorterUsage = """
+        Usage: sm-sorter.exe <datadir> <spooldir> [<basename>]
+
+          <datadir>   Data root containing the senders directory.
+          <spooldir>  SmarterMail spool root, not its proc subdirectory.
+          <basename> Optional message filename without .hdr or .eml; process that pair and exit.
+                     Omit it to watch <spooldir>\proc continuously.
+
+        Examples (PowerShell; quote paths containing spaces):
+          .\sm-sorter.exe "D:\Tagger Data" "D:\SmarterMail\Spool"
+          .\sm-sorter.exe "D:\Tagger Data" "D:\SmarterMail\Spool" message123
+        """;
+
+    public const string TaggerUsage = """
+        Usage: sm-tagger.exe <datadir> [-log] [-keep] <spooldir> [<basename>]
+
+          <datadir>   Data root containing senders, profiles, and the process queue.
+          <spooldir>  SmarterMail spool root where completed messages are returned.
+          <basename> Optional message filename without .hdr or .eml; process that pair and exit.
+                     Omit it to watch <datadir>\process continuously.
+          -log       Write the best-effort execution trace to <datadir>\log.txt.
+          -keep      Retain original and output copies in <datadir>\process.
+                     Put these options immediately after <datadir>, before <spooldir>.
+
+        Examples (PowerShell; quote paths containing spaces):
+          .\sm-tagger.exe "D:\Tagger Data" -log "D:\SmarterMail\Spool"
+          .\sm-tagger.exe "D:\Tagger Data" -log -keep "D:\SmarterMail\Spool" message123
+        """;
+
     public bool IsWatchMode => Basename is null;
 
     // Parse the sorter's positional arguments without interpreting basename hyphens as options.
@@ -30,7 +59,7 @@ public sealed record Invocation(
     {
         if (arguments.Length is not (2 or 3))
         {
-            throw new ArgumentException("Usage: sm-sorter.exe <datadir> <spooldir> [<basename>]");
+            throw new ArgumentException("Expected datadir and spooldir, with an optional basename (2 or 3 arguments).");
         }
 
         return Create(arguments[0], arguments[1], arguments.Length == 3 ? arguments[2] : null, false, false);
@@ -41,7 +70,7 @@ public sealed record Invocation(
     {
         if (arguments.Length < 2)
         {
-            throw new ArgumentException("Usage: sm-tagger.exe <datadir> [-log] [-keep] <spooldir> [<basename>]");
+            throw new ArgumentException("Expected at least datadir and spooldir.");
         }
 
         bool log = false;
@@ -73,7 +102,7 @@ public sealed record Invocation(
 
         if (arguments.Length - index is not (1 or 2))
         {
-            throw new ArgumentException("Usage: sm-tagger.exe <datadir> [-log] [-keep] <spooldir> [<basename>]");
+            throw new ArgumentException("Expected spooldir and an optional basename after datadir and any -log/-keep options.");
         }
 
         return Create(arguments[0], arguments[index], arguments.Length - index == 2 ? arguments[index + 1] : null, log, keep);

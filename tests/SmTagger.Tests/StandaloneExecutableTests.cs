@@ -1,10 +1,79 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace SmTagger.Tests;
 
 public sealed class StandaloneExecutableTests
 {
+    // Requires useful argument-count guidance before either real EXE can lock or modify its queues.
+    [StandaloneTheory]
+    [InlineData("sm-sorter", "empty")]
+    [InlineData("sm-sorter", "datadir-only")]
+    [InlineData("sm-sorter", "too-many")]
+    [InlineData("sm-tagger", "empty")]
+    [InlineData("sm-tagger", "datadir-only")]
+    [InlineData("sm-tagger", "too-many")]
+    [InlineData("sm-tagger", "log-without-spool")]
+    [InlineData("sm-tagger", "keep-without-spool")]
+    [InlineData("sm-tagger", "both-flags-without-spool")]
+    public async Task InvalidArgumentCountsShowHintsWithoutTouchingQueues(string application, string scenario)
+    {
+        using var fixture = new ProcessorFixture();
+        string binaryDirectory = CopyExecutables(fixture, application);
+        fixture.WriteMessage("process-ready");
+        fixture.WriteMessage("sorter-ready");
+        MoveToSorter(fixture, "sorter-ready");
+        string[] before = SnapshotQueues(fixture);
+        string[] arguments = scenario switch
+        {
+            "empty" => [],
+            "datadir-only" => [fixture.DataDirectory],
+            "too-many" => [fixture.DataDirectory, fixture.SpoolDirectory, "sorter-ready", "extra"],
+            "log-without-spool" => [fixture.DataDirectory, "-log"],
+            "keep-without-spool" => [fixture.DataDirectory, "-keep"],
+            "both-flags-without-spool" => [fixture.DataDirectory, "-log", "-keep"],
+            _ => throw new ArgumentOutOfRangeException(nameof(scenario))
+        };
+
+        var result = await RunAsync(binaryDirectory, application, fixture, arguments);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Empty(result.Output);
+        Assert.StartsWith("ERROR", result.Error);
+        Assert.Contains($"Usage: {application}.exe ", result.Error);
+        Assert.Equal(1, result.Error.Split("Usage:", StringSplitOptions.None).Length - 1);
+        Assert.Contains("<datadir>", result.Error);
+        Assert.Contains("<spooldir>", result.Error);
+        Assert.Contains("<basename>", result.Error);
+        Assert.Contains("Data root", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("spool root", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("watch", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("process that pair and exit", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("quote paths containing spaces", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("System.ArgumentException", result.Error);
+        Assert.DoesNotContain("\n   at ", result.Error);
+        if (application == "sm-tagger")
+        {
+            Assert.Contains("process", result.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("-log", result.Error);
+            Assert.Contains("-keep", result.Error);
+            Assert.Contains("execution trace", result.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("original and output copies", result.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("after <datadir>, before <spooldir>", result.Error);
+        }
+        else
+        {
+            Assert.Contains("proc", result.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("-log", result.Error);
+            Assert.DoesNotContain("-keep", result.Error);
+        }
+
+        Assert.Equal(before, SnapshotQueues(fixture));
+        Assert.False(File.Exists(Path.Combine(fixture.DataDirectory, "sm-tagger.lock")));
+        Assert.False(File.Exists(Path.Combine(fixture.SpoolDirectory, "proc", "sm-sorter.lock")));
+    }
+
     // Proves one relocated sorter EXE preserves nonenrolled mail without any adjacent runtime files.
     [StandaloneFact]
     public async Task StandaloneSorterPassesNonenrolledMailByteForByte()
@@ -124,6 +193,17 @@ public sealed class StandaloneExecutableTests
         return directory;
     }
 
+    // Records every protected directory and file hash so invalid invocations cannot silently mutate evidence.
+    private static string[] SnapshotQueues(ProcessorFixture fixture)
+    {
+        return new[] { fixture.DataDirectory, fixture.SpoolDirectory }
+            .SelectMany(root => Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories))
+            .Select(path => File.Exists(path)
+                ? "file " + Path.GetRelativePath(fixture.Root, path) + " " + Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)))
+                : "directory " + Path.GetRelativePath(fixture.Root, path))
+            .Order(StringComparer.Ordinal).ToArray();
+    }
+
     // Publishes the synthetic input to the sorter queue with EML present before its plain HDR.
     private static void MoveToSorter(ProcessorFixture fixture, string basename)
     {
@@ -209,11 +289,28 @@ internal sealed class StandaloneFactAttribute : FactAttribute
     // Skips explicitly until both Windows standalone release bundles have been published.
     public StandaloneFactAttribute()
     {
+        Skip = UnavailableReason();
+    }
+
+    // Shares the published-bundle prerequisite between facts and parameterized executable checks.
+    internal static string? UnavailableReason()
+    {
         string directory = ReleaseFactAttribute.ReleaseDirectory("standalone");
         if (!OperatingSystem.IsWindows() || !File.Exists(Path.Combine(directory, "sm-sorter.exe")) ||
             !File.Exists(Path.Combine(directory, "sm-tagger.exe")))
         {
-            Skip = "Run scripts/Publish-Release.ps1 on Windows before standalone executable checks.";
+            return "Run scripts/Publish-Release.ps1 on Windows before standalone executable checks.";
         }
+
+        return null;
+    }
+}
+
+internal sealed class StandaloneTheoryAttribute : TheoryAttribute
+{
+    // Applies the same explicit artifact skip policy to every argument-count case.
+    public StandaloneTheoryAttribute()
+    {
+        Skip = StandaloneFactAttribute.UnavailableReason();
     }
 }

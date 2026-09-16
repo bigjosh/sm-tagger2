@@ -56,6 +56,8 @@ sm-tagger.exe <datadir> [-log] [-keep] <spooldir> [<basename>]
 
 Omit the basename for watch mode. Supplying it processes only that plain message pair and exits. Tagger options must appear immediately after `datadir`.
 
+Missing, extra, or invalid arguments print usage hints and examples to standard error, then exit with status 1 before opening either queue. Paths containing spaces must be quoted.
+
 Both modes enforce their singleton lock. `-log` requests the best-effort UTF-8 execution trace at `<datadir>\log.txt`; without it the tagger never opens that file. `-keep` retains `.in` and `.out` debugging copies in `<datadir>\process`.
 
 Logging failures print to standard error and mail processing continues, including the current message. Corrupted or missing logs are acceptable. An activated message with the wrong number of `From:` fields or mailboxes is a real contract error: retain its original pair as `.hdr.err` and `.eml.err`, attempt the parent `.err` diagnostic and requested trace, and print the error to standard error. Out-of-band delivery of standard-error messages is deferred to FUT-005.
