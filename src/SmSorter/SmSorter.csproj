@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>sm-sorter</AssemblyName>
+    <RootNamespace>SmSorter</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../SmTagger.Shared/SmTagger.Shared.csproj" />
+  </ItemGroup>
+</Project>

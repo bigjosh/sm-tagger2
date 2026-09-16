@@ -1,0 +1,16 @@
+**/bin/
+**/obj/
+**/TestResults/
+artifacts/
+.vs/
+.vscode/
+*.user
+*.suo
+# Actual-server messages stay local and are never included in release artifacts.
+samples/
+# Local lab capture output is evidence, never a shared fixture.
+lab/SmTagger.LabServices/captures/
+# Machine-specific setup scripts and records remain local; publish only reusable lab tools.
+/lab/*
+!/lab/SmTagger.LabServices/
+!/lab/SmTagger.LabDkim/

@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SmSorter/SmSorter.csproj" />
+    <Project Path="src/SmTagger.Engine/SmTagger.Engine.csproj" />
+    <Project Path="src/SmTagger.Mail/SmTagger.Mail.csproj" />
+    <Project Path="src/SmTagger.Shared/SmTagger.Shared.csproj" />
+    <Project Path="src/SmTagger/SmTagger.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SmTagger.CrashWorker/SmTagger.CrashWorker.csproj" />
+    <Project Path="tests/SmTagger.Tests/SmTagger.Tests.csproj" />
+  </Folder>
+</Solution>

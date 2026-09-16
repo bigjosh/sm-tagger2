@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>sm-tagger-lab-dkim</AssemblyName>
+    </PropertyGroup>
+    <ItemGroup>
+        <None Update="Fixtures\rfc8463.eml" CopyToOutputDirectory="PreserveNewest" />
+        <None Update="Fixtures\rfc8463-key.txt" CopyToOutputDirectory="PreserveNewest" />
+        <None Update="Fixtures\README.md" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+</Project>

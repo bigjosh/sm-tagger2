@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../SmTagger.Mail/SmTagger.Mail.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="SmTagger.Tests" />
+    <InternalsVisibleTo Include="SmTagger.CrashWorker" />
+  </ItemGroup>
+</Project>

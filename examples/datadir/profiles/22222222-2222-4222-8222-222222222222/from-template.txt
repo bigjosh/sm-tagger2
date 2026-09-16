@@ -1,0 +1,2 @@
+tag-%@reply.example.com
+Replace this with the approved dedicated tag domain and address template.

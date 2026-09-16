@@ -1,0 +1,17 @@
+{
+  "bindAddress": "127.0.0.2",
+  "dnsPort": 53,
+  "smtpPort": 25,
+  "captureDirectory": "captures",
+  "zones": ["sm-lab.test", "reply.sm-lab.test", "recipient.test"],
+  "records": [
+    { "name": "capture.sm-lab.test", "type": "A", "value": "127.0.0.2" },
+    { "name": "sm-lab.test", "type": "MX", "value": "capture.sm-lab.test", "preference": 10 },
+    { "name": "reply.sm-lab.test", "type": "MX", "value": "capture.sm-lab.test", "preference": 10 },
+    { "name": "recipient.test", "type": "MX", "value": "capture.sm-lab.test", "preference": 10 },
+    { "name": "sm-lab.test", "type": "TXT", "value": "v=spf1 ip4:127.0.0.1 -all" },
+    { "name": "reply.sm-lab.test", "type": "TXT", "value": "v=spf1 ip4:127.0.0.1 -all" },
+    { "name": "_dmarc.sm-lab.test", "type": "TXT", "value": "v=DMARC1; p=none" },
+    { "name": "_dmarc.reply.sm-lab.test", "type": "TXT", "value": "v=DMARC1; p=none" }
+  ]
+}

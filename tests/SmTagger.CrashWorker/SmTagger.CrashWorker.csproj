@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <IsPublishable>false</IsPublishable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/SmTagger.Engine/SmTagger.Engine.csproj" />
+    <ProjectReference Include="../../src/SmTagger.Shared/SmTagger.Shared.csproj" />
+  </ItemGroup>
+</Project>

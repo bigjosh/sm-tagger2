@@ -1,0 +1,15 @@
+* text=auto
+*.cs text eol=crlf
+*.csproj text eol=crlf
+*.props text eol=crlf
+*.json text eol=crlf
+*.slnx text eol=crlf
+*.ps1 text eol=crlf
+*.md text eol=lf
+# Preserve signed/public fixtures and example identity-file bytes exactly.
+*.eml -text whitespace=cr-at-eol,-blank-at-eof
+*.hdr -text whitespace=cr-at-eol,-blank-at-eof
+examples/datadir/** -text
+lab/SmTagger.LabDkim/Fixtures/rfc8463-key.txt -text whitespace=cr-at-eol
+# The HDR example intentionally includes the literal trailing space in "Written ".
+spec.md whitespace=-blank-at-eol

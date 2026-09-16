@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../SmTagger.Shared/SmTagger.Shared.csproj" />
+  </ItemGroup>
+</Project>
