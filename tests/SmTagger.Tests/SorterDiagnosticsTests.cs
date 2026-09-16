@@ -184,6 +184,7 @@ public sealed class SorterDiagnosticsTests
         processor.ReportResiduals();
         Assert.Empty(Lines(bytes));
 
+        File.WriteAllText(tree.Input("gone.eml"), "selected final EML");
         Assert.Equal(MessageOutcome.Failed, processor.Process("gone"));
         string line = Assert.Single(Lines(bytes));
         Assert.Contains("result=ERROR", line);

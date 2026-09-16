@@ -3,6 +3,7 @@ namespace SmTagger.Shared;
 public sealed class QueueWatcher : IDisposable
 {
     private readonly string inputDirectory;
+    private readonly string inputExtension;
     private readonly Func<string, MessageOutcome> processMessage;
     private readonly Action<IReadOnlyList<string>>? onScan;
     private readonly Func<Action<Exception>, TimeSpan, bool>? waitForNotification;
@@ -14,16 +15,18 @@ public sealed class QueueWatcher : IDisposable
 
     // Keep discovery separate from the sequential processor and its message-local failure policy.
     public QueueWatcher(string inputDirectory, Func<string, MessageOutcome> processMessage,
-        Action<IReadOnlyList<string>>? onScan = null)
-        : this(inputDirectory, processMessage, onScan, null)
+        Action<IReadOnlyList<string>>? onScan = null, string inputExtension = ".hdr")
+        : this(inputDirectory, processMessage, onScan, null, inputExtension)
     {
     }
 
     // Allow tests to replace only notification waiting and errors without runtime fault controls.
     internal QueueWatcher(string inputDirectory, Func<string, MessageOutcome> processMessage,
-        Action<IReadOnlyList<string>>? onScan, Func<Action<Exception>, TimeSpan, bool>? waitForNotification)
+        Action<IReadOnlyList<string>>? onScan, Func<Action<Exception>, TimeSpan, bool>? waitForNotification,
+        string inputExtension = ".hdr")
     {
         this.inputDirectory = inputDirectory;
+        this.inputExtension = inputExtension;
         this.processMessage = processMessage;
         this.onScan = onScan;
         this.waitForNotification = waitForNotification;
@@ -52,7 +55,7 @@ public sealed class QueueWatcher : IDisposable
             try
             {
                 basenames = Directory.EnumerateFiles(inputDirectory, "*", SearchOption.TopDirectoryOnly)
-                    .Where(path => Path.GetExtension(path).Equals(".hdr", StringComparison.OrdinalIgnoreCase))
+                    .Where(path => Path.GetExtension(path).Equals(inputExtension, StringComparison.OrdinalIgnoreCase))
                     .Select(path => Path.GetFileName(path)[..^4])
                     .Order(StringComparer.Ordinal)
                     .ToArray();
@@ -108,7 +111,7 @@ public sealed class QueueWatcher : IDisposable
         }
     }
 
-    // Enable native filename hints before scanning and release the handle if setup fails.
+    // Observe final-file publication as a hint, with scans still establishing the role's ready inputs.
     private FileSystemWatcher StartNotifications()
     {
         FileSystemWatcher watcher = new(inputDirectory)

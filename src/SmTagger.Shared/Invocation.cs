@@ -4,7 +4,8 @@ public enum MessageOutcome
 {
     Succeeded,
     Failed,
-    Stale
+    Stale,
+    Deferred
 }
 
 public sealed class FatalProcessingException : Exception

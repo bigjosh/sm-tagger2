@@ -2,7 +2,7 @@
 
 This register supports [spec.md](spec.md) and [testing-plan.md](testing-plan.md). It records external conditions the pure C# implementation relies on; it does not add runtime checks or change the specification's failure rules.
 
-The version 1 implementation and local automated validation are complete for the scope recorded in [validation-report.md](validation-report.md). Synthetic fixtures, private local sample checks, and published-executable tests provide local evidence. All external deployment checks below remain **PENDING**; no SmarterMail/Windows Server installation, client, or route is claimed to have passed its bring-up gates.
+The version 1 implementation and local automated validation cover the scope recorded in [validation-report.md](validation-report.md). Synthetic fixtures, private local sample checks, and published-executable tests provide local evidence. All external deployment checks below remain **PENDING**; no SmarterMail/Windows Server installation, client, or route is claimed to have passed its bring-up gates. A live sorter trial disproved the original plain-HDR readiness assumption; `VERSION-SENSITIVE-001` records that failure and the required retest.
 
 ## Target and evidence policy
 
@@ -27,7 +27,11 @@ Keep the `VERSION-SENSITIVE-*` identifiers stable. They identify dependencies li
 
 ### VERSION-SENSITIVE-001
 
-**Queue readiness and live triggers — PENDING.** A plain HDR in the selected `proc` is complete and its EML is already complete; a suffixed HDR is inert. SmarterMail accepts externally published complete pairs in the common spool when EML arrives first and plain HDR last, including simultaneous sorter/tagger activity. Recheck after SmarterMail queue/processing changes. Test: `LAB-001`.
+**Queue readiness and live triggers — PENDING; live trial failed under the original assumption.** A plain HDR in the selected `proc` is written first and can exist for a message attempt that never produces an EML. The corrected sorter discovers final `.eml` files, checks the EML before accessing the matching HDR, and rejects `Failed` status; it does not require `Written`. Establish on the deployed build that final EML publication means complete EML bytes and matching final HDR metadata, with no subsequent producer edits. Separately establish that suffixed HDRs are inert and that SmarterMail accepts externally published complete pairs in the common spool when EML arrives first and plain HDR last, including simultaneous sorter/tagger activity. Recheck after SmarterMail queue/processing changes. Test: `LAB-001`.
+
+Observed failure, reviewed 2026-09-16: the earlier retained HDR had status `Writing`, while the later plain HDR had status `Written` and different envelope/metadata content. The sorter attempted its EML move before that file was available, then collided with its retained HDR when the later plain HDR appeared. The private captures stay outside source control and releases. These observations invalidate plain-HDR visibility as evidence of completion; they do not yet prove the corrected readiness gate on the deployed server.
+
+A [SmarterTools developer explanation](https://portal.smartertools.com/community/a96224/archive-and-spool-overview.aspx) identifies the first HDR line as status and describes `Writing`, `Failed`, and `Quarantined` in addition to `Written`. The vendor's [older custom-header sample](https://github.com/SmarterTools/SMCustomHeaders/blob/3c74049d6544f2ee96f965e36dec28123b05ae61/SM%20Custom%20Headers/SMCustomHeaders.cs) watches filename-renaming events and selects EML files. The owner clarified the intended contract on 2026-09-16: discover final EML, then read the same-basename HDR and reject `Failed`; publish outgoing EML first and HDR last. These sources and the correction determine the implementation, but do not replace a current-build live retest.
 
 ### VERSION-SENSITIVE-002
 

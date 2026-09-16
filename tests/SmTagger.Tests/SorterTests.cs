@@ -103,21 +103,22 @@ public sealed class SorterTests
         Assert.True(File.Exists(tree.Input("unsafe.eml")));
     }
 
-    // A real sharing failure while reading still proceeds to the normal HDR ownership attempt.
+    // A producer's open HDR remains untouched even when its sharing flags would allow a rename.
     [Fact]
-    public void ReadFailureStillClaimsHdrWhenRenameIsPermitted()
+    public void BusyHdrWaitsForProducerBeforeOwnership()
     {
         using SorterTestDirectory tree = new();
         tree.AddMessage("unreadable");
         using (FileStream unreadableHdr = new(tree.Input("unreadable.hdr"), FileMode.Open, FileAccess.ReadWrite, FileShare.Delete))
         {
-            Assert.Equal(MessageOutcome.Failed, tree.Processor.Process("unreadable"));
-            Assert.False(File.Exists(tree.Input("unreadable.hdr")));
-            Assert.True(File.Exists(tree.Input("unreadable.hdr.sort")));
+            Assert.Equal(MessageOutcome.Deferred, tree.Processor.Process("unreadable", watchMode: true));
+            Assert.True(File.Exists(tree.Input("unreadable.hdr")));
+            Assert.False(File.Exists(tree.Input("unreadable.hdr.sort")));
         }
 
         Assert.True(File.Exists(tree.Input("unreadable.eml")));
-        Assert.True(File.Exists(tree.Input("unreadable.sort.err")));
+        Assert.False(File.Exists(tree.Input("unreadable.sort.err")));
+        Assert.Equal(MessageOutcome.Succeeded, tree.Processor.Process("unreadable"));
     }
 
     // Failure to remove the selected live trigger is process-fatal and never overwrites a residual.
@@ -165,15 +166,17 @@ public sealed class SorterTests
         Assert.Contains("publish HDR", File.ReadAllText(tree.Input("partial.sort.err")));
     }
 
-    // A missing companion becomes a message-local failure after ownership rather than a wait.
+    // A missing final EML prevents ownership because the producer may still be receiving it.
     [Fact]
-    public void MissingEmlLeavesClaimedHdr()
+    public void MissingEmlLeavesPlainHdrForProducer()
     {
         using SorterTestDirectory tree = new();
         tree.AddMessage("missing-eml");
         File.Delete(tree.Input("missing-eml.eml"));
-        Assert.Equal(MessageOutcome.Failed, tree.Processor.Process("missing-eml"));
-        Assert.True(File.Exists(tree.Input("missing-eml.hdr.sort")));
+        Assert.Equal(MessageOutcome.Deferred, tree.Processor.Process("missing-eml"));
+        Assert.True(File.Exists(tree.Input("missing-eml.hdr")));
+        Assert.False(File.Exists(tree.Input("missing-eml.hdr.sort")));
+        Assert.False(File.Exists(tree.Input("missing-eml.sort.err")));
     }
 
     // Missing scan entries are silent stale results while missing one-shot requests fail.
@@ -181,6 +184,7 @@ public sealed class SorterTests
     public void MissingUnownedHdrHasModeSpecificOutcome()
     {
         using SorterTestDirectory tree = new();
+        File.WriteAllText(tree.Input("gone.eml"), "selected final EML");
         Assert.Equal(MessageOutcome.Stale, tree.Processor.Process("gone", watchMode: true));
         Assert.Empty(tree.Errors.ToString());
         Assert.Equal(MessageOutcome.Failed, tree.Processor.Process("gone"));

@@ -115,9 +115,9 @@ Inject the clock and tag-byte source into the tagger behavior that consumes them
 Use `FileSystemWatcher` only as a wake-up hint:
 
 - watch the direct input directory, not subdirectories;
-- enable filename notifications before the first complete scan so startup arrivals are not missed;
+- enable filename notifications before the first complete scan so startup arrivals and final-file renames can wake the loop;
 - ignore event names, event kinds, ordering, and cardinality;
-- after a wake-up, enumerate the direct directory and filter regular files by an exact final `.hdr` extension using `StringComparison.OrdinalIgnoreCase`; do not depend on wildcard matching semantics;
+- after a wake-up, enumerate the direct directory and filter regular files by the role's exact final extension using `StringComparison.OrdinalIgnoreCase`: `.eml` for the sorter, `.hdr` for the tagger; do not depend on wildcard matching semantics;
 - perform the same scan after 30 seconds without a useful notification;
 - materialize and sort every scan's basenames with `StringComparer.Ordinal`, then process them sequentially;
 - recover an overflow by scanning; treat an unrecoverable watcher error as fatal to that executable.
@@ -194,21 +194,26 @@ Precompute the complete child plan and all byte edits before publishing any chil
 
 ## 7. Sorter implementation
 
-After acquiring the sorter singleton in watch mode, enumerate direct sorter-owned residuals such as `.hdr.sort` and `.sort.err` in `proc` and report them to standard error without opening, repairing, or removing them. Then begin the ordinary plain-HDR scan. One-shot mode acts only on its requested plain basename and is not a residual-reporting or repair command.
+After acquiring the sorter singleton in watch mode, enumerate direct sorter-owned residuals such as `.hdr.sort` and `.sort.err` in `proc` and report them to standard error without opening, repairing, or removing them. Then begin the ordinary final-EML scan. One-shot mode acts only on its requested plain basename and is not a residual-reporting or repair command.
 
-Open the requested email log only after singleton acquisition. When verbose output is enabled, report startup/shutdown, queue scans, classification/routing, file-operation intents/results, stale entries, and terminal outcomes through stdout debugging. Keep these process/operation events out of the email log; its records follow `spec.md` §5.1 exactly.
+Open the requested email log only after singleton acquisition. When verbose output is enabled, report startup/shutdown, queue scans, readiness deferrals, classification/routing, file-operation intents/results, stale entries, and terminal outcomes through stdout debugging. Keep these process/operation events out of the email log; its records follow `spec.md` §5.1 exactly.
 
-For each selected plain HDR:
+For each selected final EML:
 
-1. Read it and run the shared fast classifier without opening the EML. Treat a non-missing read failure as `Hold`; do not let a read exception bypass the normal ownership attempt and leave an ambiguous live HDR behind.
-2. Convert the result and auth-index lookup into one of `Pass`, `Divert`, or `Hold`.
-3. Claim the HDR by moving it to `.hdr.sort`.
-4. On `Pass`, move EML then HDR to the spool root. On `Divert`, move EML then HDR to `process`. On `Hold`, leave the claimed pair in place and write the diagnostic.
-5. Attempt exactly one terminal email-log record: `PASS` or `DIVERT` only after the complete corresponding handoff, otherwise `ERROR` with the applicable reason and known paths. Keep the attempt best effort even when processing must throw a fatal ownership error. An explicitly missing one-shot HDR receives `ERROR`; a stale watcher entry receives debug output only.
+1. Call `File.GetAttributes` on the EML before any HDR read or probe. `FileNotFoundException` or `DirectoryNotFoundException` means `Stale` in watch mode or `Deferred` with `EML_NOT_AVAILABLE` in one-shot mode. A directory or another attribute failure means `Hold` with `INPUT_READINESS_FAILED`. Never open or read EML contents, and do not add a separate EML lock or content-completeness probe. This ordering keeps HDR-only attempts entirely outside processing.
+2. Read the matching same-basename plain HDR. Preserve the existing missing-HDR distinction between watch and one-shot modes. An `IOException` identifying Windows sharing/lock violations defers before ownership with `HDR_BUSY`; another read failure becomes `Hold` under the existing retention path.
+3. Locate the first CRLF and trim trailing ASCII SP/HTAB from its status bytes for comparison only. Exact case-sensitive `Failed` means `Hold` with `UPSTREAM_FAILED`; retain the message through the ordinary owned-error path. Other values are opaque, with no `Written` requirement or status warning. Run the existing shared fast HDR classifier and auth-index lookup to produce `Pass`, `Divert`, or `Hold`. Missing/invalid HDR framing with a final EML is `UNSAFE_HDR`, not a status-based deferral.
+4. Claim the HDR by moving it to `.hdr.sort`.
+5. On `Pass`, move EML then HDR to the spool root. On `Divert`, move EML then HDR to `process`. On `Hold`, leave the claimed pair in place and write the diagnostic.
+6. Attempt exactly one terminal email-log record: `PASS` or `DIVERT` only after the complete corresponding handoff, otherwise `ERROR` with the applicable reason and known paths. Keep the attempt best effort even when processing must throw a fatal ownership error. An explicitly missing one-shot HDR receives `ERROR`; stale watcher entries and deferred candidates receive no terminal email-log record.
+
+Return `Deferred` before any ownership move, routing lookup, or retained-error diagnostic. With `-v`, emit `DEFER` including reason and source paths. The ordinary watch loop continues and later scans reconsider final EML candidates, including after input notifications or its 30-second idle scan. One-shot mode prints `NOT READY` and returns 1. Do not add per-message sleeps, a retry loop, a timeout, or automatic recovery of suffixed files. `UPSTREAM_FAILED` is an owned message failure with `.hdr.sort`, plain EML, best-effort `.sort.err`, stderr, and terminal `ERROR`; never delete rejected upstream mail automatically.
+
+**VERSION-SENSITIVE-001:** A visible plain HDR is not a producer-completion trigger and can exist for an attempt that never publishes an EML. The sorter assumes that the final EML is complete when published and its matching HDR metadata is available; those guarantees require current live-server evidence. The tagger still discovers plain HDRs from our EML-first/HDR-last handoff. Keep the existing literal filename-component validation; the paired basename does not acquire a numeric-only requirement.
 
 The auth lookup is a simple read-only directory lookup. Apply the literal-component predicate before constructing an address-derived path. For an enrollable auth, establish that `senders` is accessible and a directory, then call `File.GetAttributes` for the one canonical child. Under the stopped-administrator trust rule, `FileNotFoundException` or `DirectoryNotFoundException` for that child means absence; an existing non-directory or any other exception means `Hold`. The trusted administrator and enforced sorter singleton mean no handle-relative lookup or race-reconciliation layer is needed.
 
-After ownership, catch message-local failures, write the best available `.sort.err`, and continue with later messages. A failure to make the HDR inert is process-fatal because the sorter cannot safely continue past the selected live trigger. A missing HDR before ownership is a stale result only in watch mode; in one-shot mode it means the requested message did not complete and returns nonzero.
+After ownership, catch message-local failures, write the best available `.sort.err`, and continue with later messages. A failure to make the HDR inert is process-fatal because the sorter cannot safely continue past the selected live trigger. With final EML present, a missing HDR before ownership is a stale result only in watch mode; in one-shot mode it means the requested message did not complete and returns nonzero. A retained plain EML beside `.hdr.sort` has no matching plain HDR and is skipped as stale; the scan never promotes or rereads the retained header.
 
 ## 8. Tagger implementation
 

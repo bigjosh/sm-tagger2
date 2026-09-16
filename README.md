@@ -6,7 +6,7 @@
 
 ## Repository status
 
-The version 1 implementation, synthetic fixtures, automated tests, configuration examples, and release scripts are present. Local validation includes the contract suite, real filesystem operations, and published executable checks. See [validation-report.md](validation-report.md) for the recorded results and limits. SmarterMail, Windows Server, SMTP/signing, catch-all, and client deployment gates remain pending.
+The version 1 implementation, synthetic fixtures, automated tests, configuration examples, and release scripts are present. Local validation includes the contract suite, real filesystem operations, and published executable checks. See [validation-report.md](validation-report.md) for the recorded results and limits. A live sorter trial exposed an unfinished plain HDR; the sorter now discovers final EML files before reading their matching HDRs. The corrected producer/readiness contract still needs live verification under [VERSION-SENSITIVE-001](assumptions.md#version-sensitive-001). SmarterMail, Windows Server, SMTP/signing, catch-all, and client deployment gates remain pending.
 
 Target the most recent generally available production versions of SmarterMail and Windows Server at bring-up. Record exact tested builds and servicing levels in `assumptions.md`. `VERSION-SENSITIVE-*` markers identify behavior to recheck after relevant product or platform updates.
 
@@ -58,7 +58,9 @@ Omit the basename for watch mode. Supplying it processes only that plain message
 
 Missing, extra, or invalid arguments print usage hints and examples to standard error, then exit with status 1 before opening either queue. Paths containing spaces must be quoted.
 
-For the sorter, `-l <logfile>` appends one best-effort UTF-8 result line per attempted message: `PASS`, `DIVERT`, or `ERROR`, with UTC time, basename, auth when known, reason, and file locations. Relative log paths resolve from the working directory; create the parent directory first. `-v` writes lifecycle, scans, routing decisions, and file-operation debugging to standard output. These options are independent; errors still go to standard error without either option. A stale watcher entry that disappears before ownership gets no email-log record.
+For the sorter, `-l <logfile>` appends one best-effort UTF-8 terminal result line per processed message: `PASS`, `DIVERT`, or `ERROR`, with UTC time, basename, auth when known, reason, and file locations. Relative log paths resolve from the working directory; create the parent directory first. `-v` writes lifecycle, scans, readiness deferrals, routing decisions, and file-operation debugging to standard output. These options are independent; errors still go to standard error without either option. A stale watcher entry that disappears before ownership and an input deferred as not ready get no email-log record.
+
+The sorter discovers `.eml` files in `proc`, then reads each matching same-basename HDR. An HDR alone never starts processing. HDR status `Failed` is rejected and retained as `.hdr.sort` with its EML and best-effort `.sort.err`; other statuses are opaque, with no `Written` requirement. A missing final EML in one-shot mode or a busy HDR is deferred untouched: one-shot mode reports `NOT READY` and exits 1 without waiting, while watch mode reconsiders EML candidates. Vanished watcher inputs are skipped as stale. The tagger still discovers `.hdr` files in `process`. Both programs publish EML first and HDR last, and neither automatically repairs or retries retained artifacts.
 
 Both modes enforce their singleton lock. For the tagger, `-log` requests the best-effort UTF-8 execution trace at `<datadir>\log.txt`; without it the tagger never opens that file. `-keep` retains `.in` and `.out` debugging copies in `<datadir>\process`.
 

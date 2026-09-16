@@ -79,7 +79,7 @@ public static class Program
 
             processor.ReportResiduals();
             watcher = new QueueWatcher(inputDirectory, basename => processor.Process(basename, watchMode: true),
-                basenames => diagnostics.Debug("-", "QUEUE_SCAN", ("count", basenames.Count)));
+                basenames => diagnostics.Debug("-", "QUEUE_SCAN", ("count", basenames.Count)), inputExtension: ".eml");
             if (Volatile.Read(ref stopRequested) != 0)
             {
                 watcher.RequestStop();

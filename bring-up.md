@@ -55,11 +55,11 @@ Required layout at this stage:
 
 The tagger stays stopped. `profiles`, `process`, `staging`, and `tag-addresses` are unnecessary for this stage. Do not copy the example sender configuration yet.
 
-**An empty, accessible `<data>\senders` enables pass-through for every message the sorter can safely classify.** A valid non-enrolled authenticated message, or a safely classified no-auth message, moves unchanged from `proc` to the spool root. This is not a bypass for malformed or ambiguous HDRs: those are held. For an enrollable auth-address, a missing/inaccessible `senders` root is also a hold condition. A missing canonical auth-address child under the accessible root means non-enrollment.
+**An empty, accessible `<data>\senders` enables pass-through for every ready message the sorter can safely classify.** A valid non-enrolled authenticated message, or a safely classified no-auth message, moves unchanged from `proc` to the spool root. Unfinished SmarterMail candidates wait untouched. This is not a bypass for malformed or ambiguous completed HDRs: those are held. For an enrollable auth-address, a missing/inaccessible `senders` root is also a hold condition. A missing canonical auth-address child under the accessible root means non-enrollment.
 
 ## 2. Prove one controlled pair
 
-With no sorter watcher running, enable the selected SmarterMail `proc` route during the attended window and submit one controlled test message. Keep the observation interval short: other queued mail waits too. Confirm a complete EML exists before its plain HDR becomes visible in `proc`, and both files are closed. Retain protected original bytes and the actual basename before processing. Use the basename without `.hdr` or `.eml`:
+With no sorter watcher running, enable the selected SmarterMail `proc` route during the attended window and submit one controlled test message. Keep the observation interval short: other queued mail waits too. A plain HDR is written first and may exist for an attempt that never produces an EML; do not use it as the readiness trigger or rename it while SmarterMail is working. Observe the final EML appearing, then read its matching same-basename HDR. Status `Failed` must be rejected; there is no `Written` whitelist. Retain protected completed original bytes and the actual basename before processing. Use the basename without `.hdr` or `.eml`:
 
 ```powershell
 $basename = 'replace-with-observed-basename'
@@ -68,11 +68,13 @@ $sorterExit = $LASTEXITCODE
 $sorterExit
 ```
 
-There are no additional directory requirements: stage 1 already created the email log's parent directory. `-l` appends a terminal `PASS`, `DIVERT`, or `ERROR` line for the message to `sorter-mail.log`; `-v` shows debugging on the console's standard output. They are optional and can be used independently. Without `-l`, the sorter opens no email log; without `-v`, it omits debug output. Errors still go to stderr. The sorter does not create a missing log parent directory.
+There are no additional directory requirements: stage 1 already created the email log's parent directory. `-l` appends a terminal `PASS`, `DIVERT`, or `ERROR` line for a processed message to `sorter-mail.log`; `-v` shows debugging on the console's standard output. They are optional and can be used independently. Without `-l`, the sorter opens no email log; without `-v`, it omits debug output. Errors still go to stderr. The sorter does not create a missing log parent directory.
 
 A successful one-shot returns `0`; the pair leaves `proc` and is published EML-first/HDR-last into `$spool`, where SmarterMail may consume it immediately. Use controlled queue observation to compare the unchanged pair bytes, and confirm delivery at the independent test receiver. Repeat for authenticated non-enrolled and no-auth paths. Establish readiness and route coverage under `LAB-001` and `LAB-002`. The email-log result describes the sorter's operation, not final delivery.
 
-If it fails, inspect stderr, `proc\<basename>.hdr.sort`, any `<basename>.sort.err`, and the EML's actual location. A publication failure can move the EML before the HDR fails. One-shot mode processes a plain pair only; it never resumes retained files.
+If it reports `NOT READY` and returns 1, a missing final EML or HDR sharing/lock conflict left the input untouched: there is no new `.hdr.sort`, `.sort.err`, or terminal email-log record. It does not wait in one-shot mode. Observe the producer completing the input before trying the plain pair again. The sorter checks for the EML before any HDR access, even in one-shot mode. With a final EML present, an exact case-sensitive `Failed` status after trailing spaces/tabs are removed is a real rejection: retain `.hdr.sort` and the EML, attempt `.sort.err`, report the failure to stderr, and record `UPSTREAM_FAILED` in the email log. No message files are deleted.
+
+For a processing error, inspect stderr, `proc\<basename>.hdr.sort`, any `<basename>.sort.err`, and the EML's actual location. A publication failure can move the EML before the HDR fails. One-shot mode processes a plain pair only; it never resumes retained files. Before another live trial, manually resolve earlier retained collisions with the relevant owners stopped; the corrected readiness gate does not repair them.
 
 ## 3. Prove the sorter watcher
 
@@ -87,7 +89,7 @@ The same folders suffice. The sorter creates/opens `proc\sm-sorter.lock`; do not
 
 Submit fresh controlled messages while the watcher is running and verify delivery. Also verify plain backlog discovery at startup, independent console shutdown/restart, and correct behavior under the intended process host (`LAB-013`). Neither program is a native Windows service. A scheduler or wrapper must preserve arguments, capture stderr and exit status, capture stdout when using `-v`, and provide the tested Ctrl+C/Ctrl+Break shutdown behavior. Use an absolute `-l` path in a job so its working directory cannot change the log location.
 
-Check fresh arrivals leave `proc`, retained suffixes and stderr are reviewed, and the receiver gets the expected mail. The optional email log contains message results only; startup, shutdown, scans, and stale watcher entries appear only in `-v` debugging. An email-log failure reports to stderr and disables that file for the invocation while mail processing continues. A running process alone does not prove successful processing: message-local failures leave inert files while the watcher continues. Watchers reconsider a completed plain HDR within 30 seconds while otherwise idle. A stopped sorter stops all mail through this `proc`.
+Check that HDR-only arrivals remain untouched and never start processing, then final EML arrivals with valid matching HDRs leave `proc` exactly once; verify the final HDR metadata and EML bytes, retained suffixes, stderr, and delivery at the receiver. Check upstream `Failed` mail is retained and reported. The optional email log contains terminal results only; startup, shutdown, scans, readiness deferrals, and stale watcher entries appear only in `-v` debugging. A deferred input gets no email-log record until a later completed processing attempt. An email-log failure reports to stderr and disables that file for the invocation while mail processing continues. A running process alone does not prove successful processing: message-local failures leave inert files, and incomplete producer attempts can remain in `proc`. The sorter reconsiders final EML candidates within 30 seconds while otherwise idle; the tagger uses plain HDR candidates in its separate queue. A stopped sorter stops all mail through this `proc`.
 
 ## 4. Start the tagger with no enrolled senders
 

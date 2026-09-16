@@ -5,18 +5,22 @@ namespace SmTagger.Tests;
 public sealed class QueueWatcherTests
 {
     // Scan the initial backlog in ordinal order while excluding directories and suffixed files.
-    [Fact]
-    public void StartupScanUsesExactFinalExtensionAndOrdinalOrder()
+    [Theory]
+    [InlineData(".hdr")]
+    [InlineData(".eml")]
+    public void StartupScanUsesExactFinalExtensionAndOrdinalOrder(string inputExtension)
     {
         using SorterTestDirectory tree = new();
-        foreach (string filename in new[] { "z.hdr", "a.HDR", "B.hDr", "ignored.hdr.start", "ignored.hdrx", "orphan.eml" })
+        string otherExtension = inputExtension == ".hdr" ? ".eml" : ".hdr";
+        foreach (string filename in new[] { "z" + inputExtension, "a" + inputExtension.ToUpperInvariant(),
+            "B" + inputExtension, "ignored" + inputExtension + ".start", "ignored" + inputExtension + "x", "orphan" + otherExtension })
         {
             File.WriteAllText(tree.Input(filename), "fixture");
         }
 
-        Directory.CreateDirectory(tree.Input("directory.hdr"));
+        Directory.CreateDirectory(tree.Input("directory" + inputExtension));
         Directory.CreateDirectory(tree.Input("nested"));
-        File.WriteAllText(tree.Input("nested/child.hdr"), "fixture");
+        File.WriteAllText(tree.Input("nested/child" + inputExtension), "fixture");
         List<string> observed = [];
         List<string[]> scans = [];
         QueueWatcher? active = null;
@@ -29,7 +33,7 @@ public sealed class QueueWatcherTests
             }
 
             return MessageOutcome.Succeeded;
-        }, basenames => scans.Add(basenames.ToArray()));
+        }, basenames => scans.Add(basenames.ToArray()), inputExtension: inputExtension);
         active = watcher;
         watcher.Run();
         Assert.Equal(["B", "a", "z"], observed);

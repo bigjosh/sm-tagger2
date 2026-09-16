@@ -124,7 +124,7 @@ sm-tagger.exe <datadir> [-log] [-keep] <spooldir> [<basename>]
 | `<spooldir>` | the SmarterMail spool folder. The sorter input is `<spooldir>\proc\`; both executables publish final mail into `<spooldir>\` |
 | sorter `<basename>` | **optional.** Given, sort that one plain pair from `proc\` and exit. Omitted, watch `proc\` |
 | tagger `<basename>` | **optional.** Given, handle that one plain pair from `<datadir>\process\` and exit. Omitted, watch `process\` |
-| `-l <logfile>` | sorter only: append one best-effort terminal result per attempted message to the selected email log (§5.1) |
+| `-l <logfile>` | sorter only: append one best-effort terminal result per processed message to the selected email log; readiness deferrals are excluded (§5.1) |
 | `-v` | sorter only: write verbose lifecycle, scan, routing, and file-operation debugging to standard output (§5.1) |
 | `-keep` | tagger only: retain copies of original and resultant files in `process\` as `.in` and `.out` |
 | `-log` | tagger only: create/open `<datadir>\log.txt` and emit the execution trace in §5.1 |
@@ -141,19 +141,19 @@ For either executable, the presence of `<basename>` selects one-shot mode; omiss
 
 Without tagger `-log`, the tagger never creates, opens, inspects, appends, rotates, truncates, or deletes its `log.txt`. Without sorter `-l`, the sorter opens no email log; without sorter `-v`, it emits no debug output. Sorter operation has no implicit dependency on tagger `log.txt`; a tagger log failure cannot stop sorting. The operator selects a dedicated sorter log file separate from mail, configuration, mapping records, and the tagger's trace.
 
-A sorter singleton/watcher failure returns nonzero and stops all flow through the selected `proc\`. A failure confined to one sorter-owned message leaves that message inert and does not stop the sorter from handling later plain HDRs. Tagger lock/configuration startup failure or fatal watcher failure returns nonzero but does not affect the independent sorter; enrolled mail remains in `process\` while unrelated mail continues. Logging failures print to standard error and do not stop either process, hold the current message, or change its exit status. One-shot mode returns nonzero when its requested message does not complete successfully for a mail-processing or contract reason.
+A sorter singleton/watcher failure returns nonzero and stops all flow through the selected `proc\`. A failure confined to one sorter-owned message leaves that message inert and does not stop the sorter from handling later EML candidates. Tagger lock/configuration startup failure or fatal watcher failure returns nonzero but does not affect the independent sorter; enrolled mail remains in `process\` while unrelated mail continues. Logging failures print to standard error and do not stop either process, hold the current message, or change its exit status. One-shot mode returns nonzero when its requested message is not ready or does not complete successfully for a mail-processing or contract reason.
 
 ### 3.1 Watch mode
 
-Entered by omitting that executable's `<basename>`. The sorter watches `proc\`; the tagger watches `<datadir>\process\`. Each considers only regular files whose final extension is exactly `.hdr`, compared ASCII case-insensitively. A further suffix makes a file inert and invisible to both programs and to SmarterMail's live trigger rule (§4).
+Entered by omitting that executable's `<basename>`. The sorter watches `proc\` for regular files whose final extension is exactly `.eml`; the tagger watches `<datadir>\process\` for regular files whose final extension is exactly `.hdr`, both compared ASCII case-insensitively. Further-suffixed files are excluded from discovery. A sorter-selected EML still needs its matching plain HDR before ownership (§4).
 
 The persistent `proc\sm-sorter.lock` and `<datadir>\sm-tagger.lock` files are not messages. Each program holds its corresponding singleton for its complete invocation (§11).
 
-Watch mode must discover completed plain HDRs that already exist at startup and must remain correct when filesystem notifications are missed, coalesced, reordered, duplicated, or overflowed. While otherwise idle, a completed plain HDR must be reconsidered within 30 seconds even if no useful notification arrives. The notification and rescan mechanism that provides these outcomes belongs in `implementation.md`.
+Sorter watch mode discovers final plain EML files in `proc\`; tagger watch mode discovers plain HDR files in `process\`. Both discover eligible backlog at startup and remain correct when filesystem notifications are missed, coalesced, reordered, duplicated, or overflowed. While otherwise idle, an eligible input must be reconsidered within 30 seconds even if no useful notification arrives. The notification and rescan mechanism that provides these outcomes belongs in `implementation.md`.
 
-Each scan sorts current basenames by ordinal comparison and processes them sequentially. A plain HDR that disappears before ownership is a stale scan result and is skipped. Once ownership succeeds, a missing EML is a message failure rather than a reason to wait. Enumeration or monitoring failure that prevents reliable continued discovery is fatal to that executable; a message-local failure is not.
+Each scan sorts current basenames by ordinal comparison and processes them sequentially. A sorter-selected EML or matching plain HDR that disappears before ownership is stale and skipped; the tagger likewise skips a vanished plain HDR before its claim. Once ownership succeeds, a missing EML is a message failure rather than a reason to wait. Enumeration or monitoring failure that prevents reliable continued discovery is fatal to that executable; a message-local failure is not.
 
-SmarterMail's input-completeness assumption applies at the sorter boundary: a visible plain HDR in `proc\` is complete and its EML should already be complete. At the tagger boundary, the sorter's EML-first/HDR-last handoff establishes the same property for a plain HDR in `process\`.
+A plain HDR in SmarterMail's `proc\` is not a sorter trigger: it is written first and may exist for an attempt that never produces an EML. The sorter selects final `.eml` files, checks the EML before any HDR access, then reads the matching same-basename HDR and rejects status `Failed` as specified in §7.3.1. Other status values are opaque, not a readiness whitelist. At the tagger boundary, the sorter's EML-first/HDR-last handoff establishes completeness for a plain HDR in `process\`.
 
 Ctrl+C or Ctrl+Break requests orderly shutdown. If idle, the program stops without claiming another message. If a message is already owned, it completes that message's normal success or message-local failure path, claims no next basename, releases its singleton, and returns 0. A fatal failure encountered while completing or shutting down still takes precedence and returns nonzero. Forced termination follows the crash rules in §9 and does not stop the other executable. The notification and cancellation mechanics that provide this behavior are defined in `implementation.md`.
 
@@ -179,18 +179,19 @@ A change that can affect one of those assumptions requires the affected evidence
 
 SmarterMail deposits pairs in `<spooldir>\proc\`. The sorter sends a safe pass-through pair directly to `<spooldir>`, or sends a potentially enrolled pair to `<datadir>\process\`. The tagger sends its unchanged or transformed outputs from `process\` to `<spooldir>`. Both input directories are flat and all per-message state is represented by filename suffixes.
 
-> ### The one rule that makes this work
-> **A message is visible to the consumer of a directory only when its HDR ends in exactly `.hdr`.** Anything with a further suffix is inert to that directory's watcher; a plain HDR moved into `spool\` is SmarterMail's live trigger.
+> ### Discovery and publication triggers
+> **The sorter discovers final `.eml` files in `proc\`; the tagger discovers plain `.hdr` files in `process\`.** The sorter never treats an HDR-only arrival as ready. Files with further suffixes are not discovery candidates. A complete plain HDR published into `process\` or `spool\` is the receiving consumer's trigger.
 >
-> Ordering follows the same rule at every boundary:
-> - **Taking ownership** — rename the `.hdr` **first**, so the trigger disappears as early as possible.
+> Our ownership and publication transitions follow this rule:
+> - **Taking ownership** — rename the `.hdr` **first**, removing the plain header before moving its EML.
 > - **Handoff/publication** — move the `.eml` **first** and the `.hdr` **last**, so a trigger appears only after its pair is complete.
 
 Sorter states in `proc\`:
 
 | files | meaning |
 |---|---|
-| `x.hdr` + `x.eml` | fresh SmarterMail arrival, not yet sorted |
+| `x.hdr` without `x.eml` | early or abandoned SmarterMail attempt; not a sorter candidate |
+| `x.eml` + `x.hdr` | final EML discovery candidate; read the matching HDR and reject `Failed` before routing |
 | `x.hdr.sort` + `x.eml` | sorter-owned pair before either destination move |
 | `x.hdr.sort` with destination `x.eml` | first handoff/publication move succeeded; HDR move is incomplete/failed |
 | `x.sort.err` | best-effort sorter diagnostic; the HDR/EML locations remain authoritative |
@@ -211,7 +212,7 @@ Tagger states in `<datadir>\process\`:
 
 Pass-through output keeps the SmarterMail-assigned input basename. Each tagged child keeps traceable continuity by using `<input-basename>-<n>`, where *n* is its canonical child ordinal (§7.4). Version 1 deliberately does not replace this with an unrelated random output id because the common basename is useful when correlating files with SmarterMail logs.
 
-The sorter classifies the HDR while it is still plain, makes the HDR inert as `.hdr.sort`, and then sends the pair either to `spool\` or to `process\`. The EML reaches the destination before the plain HDR. A crash or error between those two transitions leaves an EML at the destination and the inert HDR in `proc\`; the sorter never rolls the EML back.
+The sorter checks readiness and classifies the HDR while it is still plain, makes the HDR inert as `.hdr.sort`, and then sends the pair either to `spool\` or to `process\`. The EML reaches the destination before the plain HDR. A crash or error between those two transitions leaves an EML at the destination and the inert HDR in `proc\`; the sorter never rolls the EML back.
 
 The tagger watches only plain HDRs in `process\`, so it cannot observe a sorter handoff before its EML is present. Once claimed, the tagger's `.start`/`.break`/`.process`/`.pend` states remain inside `process\` until a final pair is published. `spool\` receives only complete outputs whose HDR arrives last.
 
@@ -269,7 +270,7 @@ Write auth-address index, sender-id, and tag-address folder names in canonical l
 
 **Best-effort logs and accepted corruption.** Logging is diagnostic and must not control mail flow. A failure to create, open, encode, write, flush, or close a log prints to standard error and processing continues with the current message and later work. It never causes a message hold, process termination, failed mapping allocation, or nonzero exit by itself. The formats below define new entry bytes, not an integrity requirement on existing contents. Corrupted logs—including malformed UTF-8, incomplete lines, and entries joined by a later append to an unfinished line—are acceptable in version 1. This loss of diagnostic quality is preferable to the complexity of validation, repair, recovery separators, or tracking unusable mappings. Append at the existing end without reading or validating prior contents. Do not repair corruption or block work because a log is absent or unusable. Logs remain diagnostic evidence, never mapping or message-state authority.
 
-**Sorter email log (`-l <logfile>`)** — an optional append-only record of terminal sorter outcomes. After acquiring the sorter singleton, attempt to open the selected file for the invocation. Do not create its parent directory. For each attempted input message, attempt one UTF-8 line without a BOM, terminated by CRLF, with this field order:
+**Sorter email log (`-l <logfile>`)** — an optional append-only record of terminal sorter outcomes. After acquiring the sorter singleton, attempt to open the selected file for the invocation. Do not create its parent directory. For each terminal message result, attempt one UTF-8 line without a BOM, terminated by CRLF, with this field order:
 
 ```text
 <UTC timestamp> basename="..." result=PASS|DIVERT|ERROR auth="..." reason="..." operation="..." hdr="..." eml="..." destination="..." error="..."
@@ -277,11 +278,11 @@ Write auth-address index, sender-id, and tag-address folder names in canonical l
 
 The timestamp format is `yyyy-MM-ddTHH:mm:ss.fffZ`. Quote and escape string values using the rules below; use `"-"` for unavailable values. `auth` is the canonical authenticated address when known. `hdr` and `eml` name the last-known/current message paths; `destination` names the attempted destination when applicable. These fields describe known state and attempted operations, not a fresh existence check. `error` preserves the applicable error detail when available.
 
-`PASS` is recorded only after unchanged publication into the spool completes; its reason is `NO_AUTH`, `UNENROLLED_AUTH`, or `UNENROLLABLE_AUTH`. `DIVERT` is recorded only after handoff into `process` completes, with reason `ENROLLED_AUTH`. `ERROR` records the failed terminal outcome, with reason `UNSAFE_HDR`, `AUTH_LOOKUP_FAILED`, `HDR_READ_FAILED`, `HDR_CLAIM_FAILED`, `HANDOFF_FAILED`, or `MISSING_HDR` as applicable. A fatal failure to claim a selected HDR and an explicitly requested missing one-shot HDR receive an `ERROR` attempt. A watcher entry that disappears before ownership is stale and receives no email-log record. No startup, shutdown, scan, or other process-lifecycle lines are written to this file.
+`PASS` is recorded only after unchanged publication into the spool completes; its reason is `NO_AUTH`, `UNENROLLED_AUTH`, or `UNENROLLABLE_AUTH`. `DIVERT` is recorded only after handoff into `process` completes, with reason `ENROLLED_AUTH`. `ERROR` records the failed terminal outcome, with reason `UPSTREAM_FAILED`, `UNSAFE_HDR`, `AUTH_LOOKUP_FAILED`, `HDR_READ_FAILED`, `INPUT_READINESS_FAILED`, `HDR_CLAIM_FAILED`, `HANDOFF_FAILED`, or `MISSING_HDR` as applicable. A fatal failure to claim a selected HDR and an explicitly requested missing one-shot HDR receive an `ERROR` attempt. A stale watcher entry receives no email-log record. A candidate deferred because its EML is unavailable or its HDR is busy is not a terminal message result and receives no email-log record in either mode. No startup, shutdown, scan, or other process-lifecycle lines are written to this file.
 
 A record is attempted after the message's terminal result is known; a crash or logging failure can leave it absent or partial even after mail has moved. `PASS` and `DIVERT` prove neither final delivery nor downstream tagger success. On formatting, open, append, flush, or close failure, report the log failure to standard error, disable only that file for the rest of the invocation, and preserve the current mail outcome, later processing, and exit status. Do not reopen, retry, rotate, truncate, repair, or recursively log the failure. A later invocation may try opening the file again. Operators may archive or clear it while the sorter is stopped.
 
-**Sorter console debugging (`-v`)** — best-effort standard-output lines prefixed `DEBUG`. Lifecycle, queue scans, routing decisions, file-operation intents/results, and stale entries identify their `event`; a terminal message summary uses the email record's result fields. This output is independent of `-l` and includes no EML contents or tagger-only configuration/mapping inspection. Without `-v`, no debug output is attempted. A console formatting/write failure disables debug output for the invocation and attempts a standard-error report, without affecting mail or the email log. Ordinary errors still go to standard error regardless of both options.
+**Sorter console debugging (`-v`)** — best-effort standard-output lines prefixed `DEBUG`. Lifecycle, queue scans, readiness deferrals, routing decisions, file-operation intents/results, and stale entries identify their `event`; a terminal message summary uses the email record's result fields. A readiness deferral uses `event=DEFER` with reason and input paths. This output is independent of `-l` and includes no EML contents or tagger-only configuration/mapping inspection. Without `-v`, no debug output is attempted. A console formatting/write failure disables debug output for the invocation and attempts a standard-error report, without affecting mail or the email log. Ordinary errors still go to standard error regardless of both options.
 
 **Tagger `log.txt`** — the optional append-only operational execution trace. It exists as a program output only when tagger `-log` is present. Encode each new event as UTF-8 without a BOM and terminate it with CRLF. Every new event begins with this stable, searchable prefix and may continue with any number of human-readable `name=value` details:
 
@@ -390,7 +391,7 @@ dmarcResult: Skipped (Authenticated)
 
 | line | content |
 |---|---|
-| 1 | literal marker `Written ` (undocumented, so ignore it except for inclusion in the `-log` trace) |
+| 1 | SmarterMail status; after final EML discovery, the sorter rejects exact `Failed` after removing trailing SP/HTAB (§7.3.1). Other values stay opaque. Preserve the original bytes. |
 | 2 | envelope MAIL FROM |
 | 3 | envelope RCPT TO — **all recipients, comma-delimited, on this one line** |
 | 4 … | `key: value` pairs to EOF, then a trailing blank line |
@@ -399,6 +400,7 @@ dmarcResult: Skipped (Authenticated)
 
 Fields that matter:
 
+- **Status** — a plain HDR may initially say `Writing`, and its envelope and metadata can still change before the final EML appears. The sorter keys discovery off that EML, then rejects a matching HDR whose first line is `Failed`. It does not require `Written` or interpret other statuses. The tagger receives complete pairs through the sorter's own handoff protocol. The current SmarterMail producer guarantees remain an empirical deployment gate (`VERSION-SENSITIVE-001` in `assumptions.md`).
 - **`from:`** — envelope sender metadata. In every current real sample it duplicates line 2, but equality is not assumed. For a tagged message, replace each parsed address that equals the selected private-address and preserve a non-matching address.
 - **`notify:`** — observed as one line per recipient, but its exact proprietary semantics remain under empirical test. Each child keeps every well-formed line whose embedded address canonically matches that child and drops every nonmatching or unparseable `notify:` line. **Match by address, never position** (§7.4). Zero or multiple matching lines are permitted and do not fail the message.
 - **`auth:`** — the authenticated account. Read it to select the sender profile (§1.2), but **never modify it**. It does not go on the wire and the delivery path needs it.
@@ -468,7 +470,7 @@ Before opening or reading the EML contents, scan the complete, normally small HD
 
 The scan returns exactly one of three results: `NO_AUTH`, `VALID_AUTH(canonical-address)`, or `UNSAFE`. Malformed framing, duplicate `auth:` fields, or a malformed/null `auth:` value returns `UNSAFE` because absence or identity cannot be established safely.
 
-The sorter uses only this result and the auth-index directory test in §7.3. `NO_AUTH` takes the direct-pass path. A valid auth-address that cannot be represented by the version 1 literal-folder layout is structurally unenrollable and also passes directly without constructing that path. For an enrollable value, a definitively absent auth directory passes directly while an existing directory diverts the untouched pair to `process\`. `UNSAFE`, an unavailable `senders\` root, a non-directory at the candidate path, or an uncertain lookup holds the message. The sorter never opens the EML contents or validates `sender-id.txt`.
+After final EML discovery and the preceding `Failed`-status rejection in §7.3.1, the sorter uses this scan result and the auth-index directory test for routing. `NO_AUTH` takes the direct-pass path. A valid auth-address that cannot be represented by the version 1 literal-folder layout is structurally unenrollable and also passes directly without constructing that path. For an enrollable value, a definitively absent auth directory passes directly while an existing directory diverts the untouched pair to `process\`. `UNSAFE`, an unavailable `senders\` root, a non-directory at the candidate path, or an uncertain lookup holds the message. The sorter never opens the EML contents or validates `sender-id.txt`.
 
 For a pair already in `process\`, the tagger's full HDR parse must resolve exactly one current auth-address against the sender configuration effective for that invocation. No auth, ambiguous/malformed auth, an unknown or retired auth, or a configuration inconsistency is a tagger message failure; none may use the sorter's direct-pass rule.
 
@@ -572,21 +574,27 @@ Sender configuration takes effect only at tagger startup and remains unchanged f
 
 #### 7.3.1 Sorter classification and handoff
 
-For each `proc\<basename>.hdr`, either specified on the sorter command line or found while watching `proc\`:
+For each `proc\<basename>.eml`, either selected by the basename on the sorter command line or found while watching `proc\`:
 
-1. Read the complete plain HDR in place and run only the fast scan in §6.4. Do not open or read the EML contents. If a watch-mode scan entry vanished before the read, it is stale and is skipped; the same absence in one-shot mode is a failed requested message. Any other HDR read failure becomes a hold decision so the sorter can attempt to make the ambiguous trigger inert.
-2. Choose one routing decision before claiming the pair:
+1. Before reading or probing the matching HDR, establish that the final `.eml` exists as a file, without opening or reading its contents. A missing EML is a stale selection in watch mode; one-shot mode defers with `EML_NOT_AVAILABLE`. Neither inspects an HDR-only attempt. A directory in its place or another failure to determine its attributes becomes a hold decision with `INPUT_READINESS_FAILED`.
+2. Read the matching same-basename plain HDR in place. If it vanished before the read, it is stale and skipped in watch mode; in one-shot mode the requested message fails. A Windows sharing/lock violation defers the candidate untouched with `HDR_BUSY`. Any other HDR read failure becomes a hold decision so the sorter can attempt to make the ambiguous trigger inert.
+3. Read the first CRLF-terminated status line, removing trailing ASCII SP/HTAB for this comparison only. Exact, case-sensitive `Failed` becomes a hold decision with `UPSTREAM_FAILED`: it must never pass or divert. Otherwise run the fast HDR scan in §6.4. There is no `Written` requirement or status whitelist; other status values remain opaque. Malformed HDR framing with a final EML follows the normal `UNSAFE_HDR` hold path rather than a status-based deferral.
+4. Choose one routing decision before claiming the pair:
    - `NO_AUTH` → direct pass to `spool\`.
    - `UNSAFE` → hold.
    - `VALID_AUTH` that cannot be represented by the literal auth-folder layout → direct pass as structurally unenrollable, without constructing that path.
    - Any other `VALID_AUTH` → divert when its exact auth directory exists, pass when that child is definitively absent beneath an accessible `senders\` root, and hold when the lookup is unavailable or uncertain.
-3. Claim the message by making the plain HDR inert as `.hdr.sort`, without replacing an existing artifact. If the plain HDR disappeared first, skip it without a diagnostic in watch mode; in one-shot mode the requested message fails. Any other ownership failure is fatal to that sorter invocation because it could not make the selected live trigger inert. Once claimed, the routing decision is fixed.
-4. For a hold decision, leave the EML plain and the HDR as `.hdr.sort`, attempt `proc\<basename>.sort.err`, report the error to standard error, and continue with later plain HDRs. Do not move either message file.
-5. For direct pass, move the plain EML to `spool\<basename>.eml`, then publish `.hdr.sort` there as the plain HDR. For diversion, move the EML to `process\<basename>.eml`, then publish the HDR there. The HDR transition is the destination's readiness event and no destination is overwritten.
+5. Claim the message by making the plain HDR inert as `.hdr.sort`, without replacing an existing artifact. If the plain HDR disappeared first, skip it without a diagnostic in watch mode; in one-shot mode the requested message fails. Any other ownership failure is fatal to that sorter invocation because it could not make the selected live trigger inert. Once claimed, the routing decision is fixed.
+6. For a hold decision, leave the EML plain and the HDR as `.hdr.sort`, attempt `proc\<basename>.sort.err`, report the error to standard error, and continue with later EML candidates. Do not move either message file after that ownership rename.
+7. For direct pass, move the plain EML to `spool\<basename>.eml`, then publish `.hdr.sort` there as the plain HDR. For diversion, move the EML to `process\<basename>.eml`, then publish the HDR there. The HDR transition is the destination's readiness event and no destination is overwritten.
+
+A deferral creates neither `.hdr.sort` nor `.sort.err`, writes no terminal email-log record, and leaves all input bytes and names untouched. Watch mode continues with other EML candidates and reconsiders them on a later notification or the ordinary rescan within 30 seconds while idle. One-shot mode does not wait: it prints `NOT READY` to standard error and returns 1. There is no per-message sleep, retry loop, or readiness timeout. A `Failed` HDR is a real terminal rejection: claim it as `.hdr.sort`, leave its EML in place, attempt `.sort.err`, report stderr and `ERROR`, and do not delete either message file.
+
+**VERSION-SENSITIVE-001:** Discovery relies on SmarterMail publishing its final EML complete with corresponding final HDR metadata available. The EML existence check does not prove those producer guarantees; establish them on the deployed build. The tagger's input contract remains the sorter's controlled EML-first/HDR-last publication. A shared basename associates the two files; no additional numeric-only basename restriction is introduced.
 
 The sorter does not parse any other HDR address, inspect `sender-id.txt`, validate whether an auth is current or retired, or verify tagger readiness. Folder existence is deliberately only a conservative routing decision. Because every retired auth index remains published, retired mail is diverted and then rejected by the tagger. A newly published auth directory affects the first lookup that observes it.
 
-If the EML is missing, a destination transition fails, or the diagnostic cannot be written, retain the exact state created by completed operations, report the available information, and continue with later plain HDRs. Never roll a moved EML back.
+If the EML disappears after the readiness check, a destination transition fails, or the diagnostic cannot be written, retain the exact state created by completed operations, report the available information, and continue with later EML candidates. Never roll a moved EML back. Existing `.hdr.sort` or `.sort.err` artifacts are not completed by this readiness gate. A remaining plain EML whose only HDR is `.hdr.sort` may be discovered, but its matching plain HDR is absent, so watch mode skips it as stale without replay. If a new matching plain pair appears alongside that residual, the conflicting ownership destination remains a fatal collision requiring manual disposition.
 
 #### 7.3.2 Tagger trigger and activation
 
@@ -726,9 +734,11 @@ A **startup/fatal failure** stops only the affected executable, releases its sin
 
 A **message-local failure** stops normal processing for the owned message, performs any specifically required contract-error retention transition (§7.3.2), preserves the resulting files, attempts the applicable `.sort.err` or parent `.err`, and lets watch mode continue with later fresh messages. These include malformed or unsupported enrolled mail, a missing EML after ownership, pre-publication identity-record allocation or random-source failure, child construction failure, an overlong edited or synthesized EML header line (§8.1), and handoff/publication/cleanup failure after ownership. Report runtime contract errors to standard error and attempt an execution-trace error event when `-log` is active. The post-publication mapping-availability failure listed above is fatal because continuing without reusing the live mapping could mint a second tag for the same identity. Log and diagnostic-file failures themselves are not mail-processing failures.
 
-A plain HDR that disappears before ownership is merely a stale scan result and needs no diagnostic. Once ownership succeeds, do not convert a failure into pass-through, retry, rollback, or lower-fidelity output.
+A selected sorter EML or matching plain HDR that disappears before ownership is stale in watch mode and needs no error diagnostic. The tagger likewise skips a vanished plain HDR before its claim. One-shot distinctions are specified in §7.3.1. Once ownership succeeds, do not convert a failure into pass-through, retry, rollback, or lower-fidelity output.
 
-One-shot mode returns nonzero if its requested message does not complete for a mail-processing or contract reason. Log and diagnostic-file failures print to standard error but do not hold mail or change the exit status. If an underlying message error already requires retention, failure to record that error does not release the retained message.
+Sorter readiness deferral is a separate pre-ownership outcome: the producer's files remain untouched and no retained-error state is created. Watch mode can reconsider that plain candidate normally; one-shot mode prints `NOT READY` and returns 1 without waiting.
+
+One-shot mode returns nonzero if its requested message is not ready or does not complete for a mail-processing or contract reason. Log and diagnostic-file failures print to standard error but do not hold mail or change the exit status. If an underlying message error already requires retention, failure to record that error does not release the retained message.
 
 ### 9.2 Retained evidence and partial publication
 
@@ -748,7 +758,7 @@ After all child HDRs are live, parent cleanup cannot cause another message publi
 
 ### 9.3 No automatic recovery
 
-Leftover `.sort`, `.start`, `.break`, `.process`, `.pend`, `.hdr.err`, and `.eml.err` files and their diagnostics are never resumed, replayed, retried, renamed back, or automatically deleted. Staging leftovers are likewise never adopted or published. They remain for manual disposition while the owning executable continues to process only fresh plain HDRs.
+Leftover `.sort`, `.start`, `.break`, `.process`, `.pend`, `.hdr.err`, and `.eml.err` files and their diagnostics are never resumed, replayed, retried, renamed back, or automatically deleted. Staging leftovers are likewise never adopted or published. They remain for manual disposition while the sorter considers final EML candidates and the tagger considers fresh plain HDRs.
 
 At startup, each watcher reports the leftovers in its own input queue and then continues with fresh work. Retained `.in` and `.out` files are expected debugging evidence rather than failed work.
 
@@ -835,7 +845,7 @@ Within each singleton:
 
 These stipulations eliminate same-program races from the version 1 design; behavior under a second same-role process that somehow bypasses singleton enforcement is not supported.
 
-The atomic visibility requirements are the observable state rules in §§4, 7, and 9: ownership removes the plain HDR first, readiness exposes the plain HDR last, a live mapping appears only as one complete directory, and existing destinations are never replaced. The supported same-volume NTFS installation makes individual moves atomic. Locking and move choices are specified in `implementation.md`.
+The atomic visibility requirements for our transitions are the observable state rules in §§4, 7, and 9: ownership removes the plain HDR first, handoff/publication exposes the plain HDR last, a live mapping appears only as one complete directory, and existing destinations are never replaced. SmarterMail's incoming candidates additionally require the readiness gate in §7.3.1. The supported same-volume NTFS installation makes individual moves atomic. Locking and move choices are specified in `implementation.md`.
 
 ## 12. Future scope
 

@@ -23,7 +23,7 @@ public sealed class SorterProcessor
         this.diagnostics = diagnostics;
     }
 
-    // Classify only HDR bytes, own its live trigger, and publish EML before HDR without rollback.
+    // Wait for producer readiness, classify only HDR bytes, and publish EML before HDR without rollback.
     public MessageOutcome Process(string basename, bool watchMode = false)
     {
         string sourceHdr = Path.Combine(inputDirectory, basename + ".hdr");
@@ -31,7 +31,7 @@ public sealed class SorterProcessor
         string sourceEml = Path.Combine(inputDirectory, basename + ".eml");
         string currentHdr = sourceHdr;
         string currentEml = sourceEml;
-        string operation = "read HDR";
+        string operation = "check EML readiness";
         string? destination = null;
         string? canonicalAuth = null;
         Exception? holdReason = null;
@@ -40,60 +40,97 @@ public sealed class SorterProcessor
 
         try
         {
+            // VERSION-SENSITIVE-001: Final EML publication, not provisional HDR visibility, admits work.
+            try
+            {
+                FileAttributes attributes = File.GetAttributes(sourceEml);
+                if ((attributes & FileAttributes.Directory) != 0)
+                    throw new IOException("The companion EML is not a regular file.");
+            }
+            catch (IOException error) when (error is FileNotFoundException or DirectoryNotFoundException)
+            {
+                if (watchMode)
+                {
+                    diagnostics?.Debug(basename, "STALE", ("operation", operation));
+                    return MessageOutcome.Stale;
+                }
+                return NotReady(basename, watchMode, "EML_NOT_AVAILABLE", sourceHdr, sourceEml);
+            }
+            operation = "read HDR";
             diagnostics?.Debug(basename, "READ_HDR", ("path", sourceHdr));
             byte[] hdr = File.ReadAllBytes(sourceHdr);
-            FastHdrResult classification = FastHdrClassifier.Classify(hdr);
-            canonicalAuth = classification.CanonicalAuth;
-            if (classification.Kind == FastHdrKind.Unsafe)
+            int statusEnd = hdr.AsSpan().IndexOf("\r\n"u8);
+            operation = "classify HDR";
+            if (statusEnd >= 0 && hdr.AsSpan(0, statusEnd).TrimEnd(" \t"u8).SequenceEqual("Failed"u8))
             {
-                routeReason = "UNSAFE_HDR";
-                holdReason = new InvalidDataException(classification.Reason ?? "The HDR does not establish a safe auth classification.");
+                routeReason = "UPSTREAM_FAILED";
+                holdReason = new InvalidDataException("SmarterMail marked the message Failed.");
             }
-            else if (classification.Kind == FastHdrKind.ValidAuth && WindowsNames.IsUsableComponent(canonicalAuth!))
+            else
             {
-                operation = "look up authenticated enrollment";
-                routeReason = "UNENROLLED_AUTH";
-                diagnostics?.Debug(basename, "AUTH_LOOKUP", ("auth", canonicalAuth), ("root", sendersDirectory));
-                FileAttributes rootAttributes = File.GetAttributes(sendersDirectory);
-                if ((rootAttributes & FileAttributes.Directory) == 0)
+                FastHdrResult classification = FastHdrClassifier.Classify(hdr);
+                canonicalAuth = classification.CanonicalAuth;
+                if (classification.Kind == FastHdrKind.Unsafe)
                 {
-                    throw new IOException("The senders root is not a directory.");
+                    routeReason = "UNSAFE_HDR";
+                    holdReason = new InvalidDataException(classification.Reason ?? "The HDR does not establish a safe auth classification.");
                 }
-
-                string authDirectory = Path.Combine(sendersDirectory, canonicalAuth!);
-                try
+                else if (classification.Kind == FastHdrKind.ValidAuth && WindowsNames.IsUsableComponent(canonicalAuth!))
                 {
-                    FileAttributes attributes = File.GetAttributes(authDirectory);
-                    if ((attributes & FileAttributes.Directory) == 0)
+                    operation = "look up authenticated enrollment";
+                    routeReason = "UNENROLLED_AUTH";
+                    diagnostics?.Debug(basename, "AUTH_LOOKUP", ("auth", canonicalAuth), ("root", sendersDirectory));
+                    FileAttributes rootAttributes = File.GetAttributes(sendersDirectory);
+                    if ((rootAttributes & FileAttributes.Directory) == 0)
                     {
-                        throw new IOException("The auth routing entry is not a directory: " + ConsoleErrors.Quote(authDirectory));
+                        throw new IOException("The senders root is not a directory.");
                     }
 
-                    divert = true;
-                    routeReason = "ENROLLED_AUTH";
+                    string authDirectory = Path.Combine(sendersDirectory, canonicalAuth!);
+                    try
+                    {
+                        FileAttributes attributes = File.GetAttributes(authDirectory);
+                        if ((attributes & FileAttributes.Directory) == 0)
+                        {
+                            throw new IOException("The auth routing entry is not a directory: " + ConsoleErrors.Quote(authDirectory));
+                        }
+
+                        divert = true;
+                        routeReason = "ENROLLED_AUTH";
+                    }
+                    catch (FileNotFoundException)
+                    {
+                        // Absence under the accessible trusted root proves the auth is not enrolled.
+                    }
+                    catch (DirectoryNotFoundException)
+                    {
+                        // The immutable administrative root was established before this child lookup.
+                    }
                 }
-                catch (FileNotFoundException)
+                else if (classification.Kind == FastHdrKind.ValidAuth)
                 {
-                    // Absence under the accessible trusted root proves the auth is not enrolled.
+                    routeReason = "UNENROLLABLE_AUTH";
                 }
-                catch (DirectoryNotFoundException)
-                {
-                    // The immutable administrative root was established before this child lookup.
-                }
-            }
-            else if (classification.Kind == FastHdrKind.ValidAuth)
-            {
-                routeReason = "UNENROLLABLE_AUTH";
             }
         }
         catch (FileNotFoundException error) when (operation == "read HDR")
         {
             return MissingBeforeOwnership(basename, watchMode, error, canonicalAuth, "read HDR");
         }
+        catch (IOException error) when (operation == "read HDR" && (error.HResult & 0xffff) is 32 or 33)
+        {
+            return NotReady(basename, watchMode, "HDR_BUSY", sourceHdr, sourceEml);
+        }
         catch (Exception error)
         {
             holdReason = error;
-            routeReason = operation == "read HDR" ? "HDR_READ_FAILED" : "AUTH_LOOKUP_FAILED";
+            routeReason = operation switch
+            {
+                "read HDR" => "HDR_READ_FAILED",
+                "check EML readiness" => "INPUT_READINESS_FAILED",
+                "classify HDR" => "UNSAFE_HDR",
+                _ => "AUTH_LOOKUP_FAILED"
+            };
         }
 
         diagnostics?.Debug(basename, "ROUTE", ("auth", canonicalAuth), ("reason", routeReason),
@@ -160,6 +197,26 @@ public sealed class SorterProcessor
                 currentHdr, currentEml, destination, canonicalAuth, error);
             return MessageOutcome.Failed;
         }
+    }
+
+    // Leave unready inputs untouched and explain a one-shot deferral without terminal result logging.
+    private MessageOutcome NotReady(string basename, bool watchMode, string reason, string hdr, string eml)
+    {
+        try
+        {
+            diagnostics?.Debug(basename, "DEFER", ("reason", reason), ("hdr", hdr), ("eml", eml));
+            if (!watchMode)
+            {
+                ConsoleErrors.Write(standardError, "NOT READY sorter input left untouched basename=" + ConsoleErrors.Quote(basename)
+                    + " reason=" + reason
+                    + " HDR=" + ConsoleErrors.Quote(hdr) + " EML=" + ConsoleErrors.Quote(eml));
+            }
+        }
+        catch (Exception)
+        {
+            // Diagnostic formatting cannot turn a producer-owned input into an owned failure.
+        }
+        return MessageOutcome.Deferred;
     }
 
     // Name sorter-owned leftovers only in watch startup without opening or repairing them.

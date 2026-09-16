@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using SmTagger.Engine;
 using SmTagger.Shared;
 
@@ -155,6 +156,156 @@ public sealed class ReleaseExecutableTests
         Assert.Contains("result=PASS", output);
     }
 
+    // Discover only final EML files, ignore orphan HDRs, and route with the completed replacement HDR.
+    [ReleaseFact]
+    public async Task PublishedSorterWatcherWaitsForCompletedPairAndUsesFinalHdr()
+    {
+        using var fixture = new ProcessorFixture();
+        string input = Path.Combine(fixture.SpoolDirectory, "proc");
+        string logfile = Path.Combine(fixture.Root, "sorter-readiness.log");
+        const string basename = "a-readiness";
+        byte[] provisional = Encoding.ASCII.GetBytes("Writing \r\nearly@example.com\r\nearly@example.net\r\n\r\n");
+        string sourceHdr = Path.Combine(input, basename + ".hdr");
+        string sourceEml = Path.Combine(input, basename + ".eml");
+        string orphanHdr = Path.Combine(input, "b-orphan.hdr");
+        File.WriteAllBytes(sourceHdr, provisional);
+        File.WriteAllBytes(orphanHdr, provisional);
+        fixture.WriteMessage("z-first-scan", ProcessorFixture.Header(auth: "not-enrolled@example.com"));
+        MoveToSorter(fixture, "z-first-scan");
+        using var sorter = Start("sm-sorter", fixture,
+            [fixture.DataDirectory, "-l", logfile, "-v", fixture.SpoolDirectory]);
+        await WaitUntilAsync(() => File.Exists(logfile) && ReadSharedText(logfile)
+            .Contains("basename=\"z-first-scan\" result=PASS", StringComparison.Ordinal), sorter);
+
+        Assert.Equal(provisional, File.ReadAllBytes(sourceHdr));
+        Assert.False(File.Exists(sourceEml));
+        Assert.False(File.Exists(Path.Combine(input, basename + ".hdr.sort")));
+        Assert.False(File.Exists(Path.Combine(input, basename + ".sort.err")));
+        Assert.DoesNotContain("basename=\"" + basename + "\"", ReadSharedText(logfile));
+
+        byte[] finalEml = Encoding.ASCII.GetBytes(ProcessorFixture.Message(body: "Final synthetic message.\r\n"));
+        string stagedEml = sourceEml + ".tmp";
+        File.WriteAllBytes(stagedEml, finalEml);
+        fixture.WriteMessage("z-second-scan", ProcessorFixture.Header(auth: "not-enrolled@example.com"));
+        MoveToSorter(fixture, "z-second-scan");
+        await WaitUntilAsync(() => ReadSharedText(logfile)
+            .Contains("basename=\"z-second-scan\" result=PASS", StringComparison.Ordinal), sorter);
+
+        Assert.Equal(provisional, File.ReadAllBytes(sourceHdr));
+        Assert.False(File.Exists(sourceEml));
+        Assert.Equal(finalEml, File.ReadAllBytes(stagedEml));
+        Assert.False(File.Exists(Path.Combine(input, basename + ".hdr.sort")));
+        Assert.False(File.Exists(Path.Combine(input, basename + ".sort.err")));
+        Assert.DoesNotContain("basename=\"" + basename + "\"", ReadSharedText(logfile));
+
+        byte[] finalHdr = Encoding.ASCII.GetBytes(ProcessorFixture.Header("final@example.net",
+            extra: "opaque: final replacement\r\n"));
+        string stagedHdr = Path.Combine(input, basename + ".hdr.ready");
+        File.WriteAllBytes(stagedHdr, finalHdr);
+        File.Move(stagedHdr, sourceHdr, overwrite: true);
+        File.Move(stagedEml, sourceEml);
+        await WaitUntilAsync(() => ReadSharedText(logfile)
+            .Contains("basename=\"" + basename + "\" result=DIVERT", StringComparison.Ordinal) &&
+            ReadSharedText(logfile).EndsWith("\r\n", StringComparison.Ordinal), sorter);
+
+        Assert.Equal(finalHdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, basename + ".hdr")));
+        Assert.Equal(finalEml, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, basename + ".eml")));
+        Assert.False(File.Exists(Path.Combine(fixture.SpoolDirectory, basename + ".hdr")));
+        Assert.False(File.Exists(sourceHdr));
+        Assert.False(File.Exists(sourceEml));
+        Assert.False(File.Exists(Path.Combine(input, basename + ".hdr.sort")));
+        Assert.False(File.Exists(Path.Combine(input, basename + ".sort.err")));
+        string[] records = ReadSharedText(logfile).Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(3, records.Length);
+        string result = Assert.Single(records, line => line.Contains("basename=\"" + basename + "\"", StringComparison.Ordinal));
+        Assert.Contains("auth=\"auth@example.com\"", result);
+        Assert.Contains("result=DIVERT", result);
+        Assert.DoesNotContain("early@example.com", result);
+        Assert.Equal(provisional, File.ReadAllBytes(orphanHdr));
+        Assert.False(File.Exists(Path.Combine(input, "b-orphan.hdr.sort")));
+        Assert.False(File.Exists(Path.Combine(input, "b-orphan.sort.err")));
+        Assert.DoesNotContain("basename=\"b-orphan\"", ReadSharedText(logfile));
+
+        sorter.Stop();
+        Assert.Empty(await sorter.Error.WaitAsync(TimeSpan.FromSeconds(10)));
+        string output = await sorter.Output.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.DoesNotContain("basename=\"b-orphan\"", output);
+        Assert.Contains("result=DIVERT", output);
+    }
+
+    // A failed upstream HDR is retained once while the live sorter continues with later final EMLs.
+    [ReleaseFact]
+    public async Task PublishedSorterWatcherRetainsFailedHdrAndContinues()
+    {
+        using var fixture = new ProcessorFixture();
+        string input = Path.Combine(fixture.SpoolDirectory, "proc");
+        string logfile = Path.Combine(fixture.Root, "sorter-upstream-failure.log");
+        var failed = fixture.WriteMessage("a-upstream-failed",
+            ProcessorFixture.Header(auth: "not-enrolled@example.com").Replace("Written \r\n", "Failed \r\n"));
+        MoveToSorter(fixture, "a-upstream-failed");
+        var passed = fixture.WriteMessage("b-after-failed", ProcessorFixture.Header(auth: "not-enrolled@example.com"));
+        MoveToSorter(fixture, "b-after-failed");
+        using var sorter = Start("sm-sorter", fixture,
+            [fixture.DataDirectory, "-l", logfile, "-v", fixture.SpoolDirectory]);
+        await WaitUntilAsync(() => File.Exists(logfile) && ReadSharedText(logfile)
+            .Contains("basename=\"b-after-failed\" result=PASS", StringComparison.Ordinal), sorter);
+
+        Assert.Equal(failed.Hdr, File.ReadAllBytes(Path.Combine(input, "a-upstream-failed.hdr.sort")));
+        Assert.Equal(failed.Eml, File.ReadAllBytes(Path.Combine(input, "a-upstream-failed.eml")));
+        Assert.True(File.Exists(Path.Combine(input, "a-upstream-failed.sort.err")));
+        Assert.False(File.Exists(Path.Combine(input, "a-upstream-failed.hdr")));
+        Assert.False(File.Exists(Path.Combine(fixture.SpoolDirectory, "a-upstream-failed.hdr")));
+        Assert.Equal(passed.Hdr, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "b-after-failed.hdr")));
+        Assert.Equal(passed.Eml, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "b-after-failed.eml")));
+
+        fixture.WriteMessage("c-next-arrival", ProcessorFixture.Header(auth: "not-enrolled@example.com"));
+        MoveToSorter(fixture, "c-next-arrival");
+        await WaitUntilAsync(() => ReadSharedText(logfile)
+            .Contains("basename=\"c-next-arrival\" result=PASS", StringComparison.Ordinal) &&
+            ReadSharedText(logfile).EndsWith("\r\n", StringComparison.Ordinal), sorter);
+        string[] records = ReadSharedText(logfile).Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(3, records.Length);
+        string errorRecord = Assert.Single(records, line => line.Contains("result=ERROR", StringComparison.Ordinal));
+        Assert.Contains("reason=\"UPSTREAM_FAILED\"", errorRecord);
+        Assert.False(sorter.Process.HasExited);
+
+        sorter.Stop();
+        Assert.NotEmpty(await sorter.Error.WaitAsync(TimeSpan.FromSeconds(10)));
+    }
+
+    // One-shot readiness failures leave the input live and produce no terminal email-log record.
+    [ReleaseFact]
+    public async Task PublishedSorterOneShotWaitsForMissingEmlWithoutOwningHdr()
+    {
+        using var fixture = new ProcessorFixture();
+        var original = fixture.WriteMessage("one-shot-ready", ProcessorFixture.Header(auth: "not-enrolled@example.com"));
+        string input = Path.Combine(fixture.SpoolDirectory, "proc");
+        string sourceHdr = Path.Combine(input, "one-shot-ready.hdr");
+        string logfile = Path.Combine(fixture.Root, "one-shot-readiness.log");
+        File.Move(Path.Combine(fixture.ProcessDirectory, "one-shot-ready.hdr"), sourceHdr);
+
+        var waiting = await RunAsync("sm-sorter", fixture,
+            [fixture.DataDirectory, "-l", logfile, "-v", fixture.SpoolDirectory, "one-shot-ready"]);
+
+        Assert.Equal(1, waiting.ExitCode);
+        Assert.Contains("NOT READY", waiting.Error);
+        Assert.Contains("event=DEFER", waiting.Output);
+        Assert.Empty(File.ReadAllText(logfile));
+        Assert.Equal(original.Hdr, File.ReadAllBytes(sourceHdr));
+        Assert.False(File.Exists(Path.Combine(input, "one-shot-ready.hdr.sort")));
+        Assert.False(File.Exists(Path.Combine(input, "one-shot-ready.sort.err")));
+
+        File.Move(Path.Combine(fixture.ProcessDirectory, "one-shot-ready.eml"), Path.Combine(input, "one-shot-ready.eml"));
+        var completed = await RunAsync("sm-sorter", fixture,
+            [fixture.DataDirectory, "-l", logfile, fixture.SpoolDirectory, "one-shot-ready"]);
+
+        Assert.Equal(0, completed.ExitCode);
+        Assert.Empty(completed.Error);
+        Assert.Equal(original.Hdr, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "one-shot-ready.hdr")));
+        Assert.Equal(original.Eml, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "one-shot-ready.eml")));
+        Assert.Contains("result=PASS", Assert.Single(File.ReadAllLines(logfile)));
+    }
+
     // Killing the actual release process during fan-out leaves inert work that restart must not replay.
     [ReleaseFact]
     public async Task ForcedTerminationDuringFanOutReloadsMappingsWithoutResumingMail()
@@ -211,10 +362,10 @@ public sealed class ReleaseExecutableTests
         }
     }
 
-    // Feeds the exact synthetic pair through the sorter's queue without changing its bytes.
+    // Publish the final EML after its complete HDR to model the sorter's producer readiness signal.
     private static void MoveToSorter(ProcessorFixture fixture, string basename)
     {
-        foreach (var extension in new[] { ".eml", ".hdr" })
+        foreach (var extension in new[] { ".hdr", ".eml" })
         {
             File.Move(Path.Combine(fixture.ProcessDirectory, basename + extension),
                 Path.Combine(fixture.SpoolDirectory, "proc", basename + extension));
