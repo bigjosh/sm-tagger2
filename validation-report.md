@@ -1,6 +1,6 @@
 # Local implementation validation
 
-Version 1 is implemented and passes the local validation scope below. The release-candidate validation on **2026-09-15** passed **328 tests, with zero failures and zero skips**. The Release build completed with **zero warnings and zero errors**, and formatting verification passed. Both application-folder and standalone EXE distributions are ready for the controlled deployment tests in [testing-plan.md](testing-plan.md). Earlier implementation review and fixes are recorded in [audit-2026-09-07.md](audit-2026-09-07.md).
+Version 1 is implemented and passes the local validation scope below. The release-candidate validation on **2026-09-15** passed **337 tests, with zero failures and zero skips**. The Release build completed with **zero warnings and zero errors**, and formatting verification passed. Both application-folder and standalone EXE distributions are ready for the controlled deployment tests in [testing-plan.md](testing-plan.md). Earlier implementation review and fixes are recorded in [audit-2026-09-07.md](audit-2026-09-07.md).
 
 ## Reproduce and inspect
 
@@ -15,15 +15,15 @@ The execution policy applies only to that process. The saved machine policy was 
 Evidence from this run:
 
 - [Test results](artifacts/test-results/local-contracts.trx).
-- [Validation command output](artifacts/test-results/validation-2026-09-15.txt).
+- [Validation command output](artifacts/test-results/validation-v1.0.0-rc.2.txt).
 - [Release file and package SHA-256 manifest](artifacts/release/manifest.json).
-- [Independent artifact verification](artifacts/test-results/artifact-verification-2026-09-15.json).
+- [Independent artifact verification](artifacts/test-results/artifact-verification-v1.0.0-rc.2.json).
 - Seven deterministic crash-boundary tests, included in the complete test results above.
 - [Dependency advisory audit](artifacts/test-results/dependency-audit-2026-09-15.json).
 
 Generated evidence and packages live under ignored `artifacts/`; a fresh checkout recreates them through the scripts. The private sample tests skip explicitly if `samples/` is absent. Release executable tests skip explicitly if the applications have not been published; the validation script publishes them first.
 
-The current release folders, standalone EXEs, ZIPs, and manifest represent **v1.0.0-rc.1**. Public assets and their manifest are available from [the GitHub release](https://github.com/bigjosh/sm-tagger2/releases/tag/v1.0.0-rc.1). Raw local evidence and private messages are not published.
+The current release folders, standalone EXEs, ZIPs, and manifest represent **v1.0.0-rc.2**. Public assets and their manifest are available from [the GitHub release](https://github.com/bigjosh/sm-tagger2/releases/tag/v1.0.0-rc.2). Raw local evidence and private messages are not published.
 
 ## Tested environment
 
@@ -33,7 +33,7 @@ The current release folders, standalone EXEs, ZIPs, and manifest represent **v1.
 | Filesystems | Local C: and D: volumes reported NTFS and healthy; isolated test trees used the local temporary directory |
 | SDK | 10.0.400, pinned by `global.json` |
 | Target / bundled runtime | `net10.0` / Microsoft.NETCore.App 10.0.11 |
-| Publication | `1.0.0-rc.1`, Release, self-contained `win-x64`; application folders and single-file EXEs; no trimming |
+| Publication | `1.0.0-rc.2`, Release, self-contained `win-x64`; application folders and single-file EXEs; no trimming |
 | Dependency audit | `dotnet list SmTagger.slnx package --vulnerable --include-transitive --format json` reported no vulnerable package entries on this date |
 
 Production projects use the .NET base class library. Test package versions are locked. The dependency audit is a dated advisory check, not a guarantee that future vulnerabilities will not be discovered.
@@ -48,10 +48,10 @@ Production projects use the .NET base class library. Test package versions are l
 | Best-effort diagnostics | 24 | Missing/corrupt logs, initialization/append/encoding/flush/disposal failures, trace disablement, stderr reporting, preservation of the underlying processing result |
 | Sorter, invocation, and queue lifecycle | 46 | HDR-only routing, unread EML pass-through, ownership ordering, literal basenames, independent singleton locks, sorted scans, native notification arrivals, overflow/error paths, stopping after owned work |
 | Published executable processes | 7 | End-to-end sorter/tagger operation, exit status and logging failures, independent watchers, singleton contention, startup-failure isolation, crash/restart, release dependency isolation |
-| Standalone executable processes | 3 | Relocated EXEs with no adjacent dependencies, byte-exact sorter pass-through, enrolled diversion and two-recipient rewriting, body preservation, From-error retention, and continued processing after logging failure |
+| Standalone executable processes | 12 | Nine argument-error cases verify concise usage hints, exit status, untouched queues/configuration, and absent locks; relocated EXEs with no adjacent dependencies, byte-exact sorter pass-through, enrolled diversion and two-recipient rewriting, body preservation, From-error retention, and continued processing after logging failure |
 | Deterministic process-crash boundaries | 7 | Forced termination of a separate test worker at exact internal boundaries; production tagger watcher restart, exact retained file inventories/hashes, complete mapping reload/reuse, and successful fresh mail |
 | Private actual-server samples | 3 | Five complete captured pairs parsed and classified; authenticated no-match and activated processing checked using temporary copies |
-| **Total** | **328** | **All executed; none skipped** |
+| **Total** | **337** | **All executed; none skipped** |
 
 The three adversarial parser tests run **4,608 deterministic generated cases** internally: 3,072 arbitrary/mutated HDR and EML pairs, 1,024 valid generated EML messages, and 512 valid generated HDR messages. They check controlled contract failures and independently composed expected output bytes. These cases are included in the 87 parsing tests above, not counted as thousands of separate test-runner tests.
 
@@ -63,8 +63,8 @@ Seven additional crash tests terminate a separate test-only worker after HDR own
 
 ## Release packages
 
-- [Standalone sorter EXE](https://github.com/bigjosh/sm-tagger2/releases/download/v1.0.0-rc.1/sm-sorter.exe)
-- [Standalone tagger EXE](https://github.com/bigjosh/sm-tagger2/releases/download/v1.0.0-rc.1/sm-tagger.exe)
+- [Standalone sorter EXE](https://github.com/bigjosh/sm-tagger2/releases/download/v1.0.0-rc.2/sm-sorter.exe)
+- [Standalone tagger EXE](https://github.com/bigjosh/sm-tagger2/releases/download/v1.0.0-rc.2/sm-tagger.exe)
 - [sm-sorter Windows x64 ZIP](artifacts/release/sm-sorter-win-x64.zip)
 - [sm-tagger Windows x64 ZIP](artifacts/release/sm-tagger-win-x64.zip)
 
@@ -72,7 +72,7 @@ Both forms include their .NET runtime. The standalone EXEs need no adjacent DLLs
 
 The standalone tests also capture .NET host diagnostics: these Windows x64 .NET 10.0.11 bundles report self-contained execution with CoreCLR embedded in the native host, and leave their fresh runtime-extraction directories empty. The tests accept either that embedded runtime or extraction into the controlled directory when a future runtime pack requires it. Extraction behavior and the actual process identity remain part of the deployment hosting check.
 
-The [release manifest](https://github.com/bigjosh/sm-tagger2/releases/download/v1.0.0-rc.1/manifest.json) is the authoritative SHA-256 inventory for the EXEs, runtime notices, complete application folders, and ZIPs.
+The [release manifest](https://github.com/bigjosh/sm-tagger2/releases/download/v1.0.0-rc.2/manifest.json) is the authoritative SHA-256 inventory for the EXEs, runtime notices, complete application folders, and ZIPs.
 
 Independent verification matched all **400 deployment files** and all **396 archived file entries** against the manifest and checked both package hashes. The inventory includes four application-folder runtime notice files and the two standalone EXEs with their shared notices. Release checks exclude sample messages, test assemblies, the crash worker, and lab helpers. The sorter carries no tagger-only mail or engine assemblies. The publish script recreates its generated output directories before building.
 
