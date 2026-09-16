@@ -10,15 +10,17 @@ public sealed class SorterProcessor
     private readonly string processDirectory;
     private readonly string sendersDirectory;
     private readonly TextWriter standardError;
+    private readonly SorterDiagnostics? diagnostics;
 
     // Bind trusted queue roots without reading profiles, mappings, or any tagger log.
-    public SorterProcessor(string dataDir, string spoolDir, TextWriter? stderr = null)
+    public SorterProcessor(string dataDir, string spoolDir, TextWriter? stderr = null, SorterDiagnostics? diagnostics = null)
     {
         inputDirectory = Path.Combine(spoolDir, "proc");
         spoolDirectory = spoolDir;
         processDirectory = Path.Combine(dataDir, "process");
         sendersDirectory = Path.Combine(dataDir, "senders");
         standardError = stderr ?? Console.Error;
+        this.diagnostics = diagnostics;
     }
 
     // Classify only HDR bytes, own its live trigger, and publish EML before HDR without rollback.
@@ -34,19 +36,24 @@ public sealed class SorterProcessor
         string? canonicalAuth = null;
         Exception? holdReason = null;
         bool divert = false;
+        string routeReason = "NO_AUTH";
 
         try
         {
+            diagnostics?.Debug(basename, "READ_HDR", ("path", sourceHdr));
             byte[] hdr = File.ReadAllBytes(sourceHdr);
             FastHdrResult classification = FastHdrClassifier.Classify(hdr);
             canonicalAuth = classification.CanonicalAuth;
             if (classification.Kind == FastHdrKind.Unsafe)
             {
+                routeReason = "UNSAFE_HDR";
                 holdReason = new InvalidDataException(classification.Reason ?? "The HDR does not establish a safe auth classification.");
             }
             else if (classification.Kind == FastHdrKind.ValidAuth && WindowsNames.IsUsableComponent(canonicalAuth!))
             {
                 operation = "look up authenticated enrollment";
+                routeReason = "UNENROLLED_AUTH";
+                diagnostics?.Debug(basename, "AUTH_LOOKUP", ("auth", canonicalAuth), ("root", sendersDirectory));
                 FileAttributes rootAttributes = File.GetAttributes(sendersDirectory);
                 if ((rootAttributes & FileAttributes.Directory) == 0)
                 {
@@ -63,6 +70,7 @@ public sealed class SorterProcessor
                     }
 
                     divert = true;
+                    routeReason = "ENROLLED_AUTH";
                 }
                 catch (FileNotFoundException)
                 {
@@ -73,32 +81,45 @@ public sealed class SorterProcessor
                     // The immutable administrative root was established before this child lookup.
                 }
             }
+            else if (classification.Kind == FastHdrKind.ValidAuth)
+            {
+                routeReason = "UNENROLLABLE_AUTH";
+            }
         }
         catch (FileNotFoundException error) when (operation == "read HDR")
         {
-            return MissingBeforeOwnership(basename, watchMode, error);
+            return MissingBeforeOwnership(basename, watchMode, error, canonicalAuth, "read HDR");
         }
         catch (Exception error)
         {
             holdReason = error;
+            routeReason = operation == "read HDR" ? "HDR_READ_FAILED" : "AUTH_LOOKUP_FAILED";
         }
 
+        diagnostics?.Debug(basename, "ROUTE", ("auth", canonicalAuth), ("reason", routeReason),
+            ("decision", holdReason is not null ? "HOLD" : divert ? "DIVERT" : "PASS"));
         try
         {
+            diagnostics?.Debug(basename, "MOVE_INTENT", ("operation", "claim HDR"), ("source", sourceHdr), ("destination", ownedHdr));
             File.Move(sourceHdr, ownedHdr, overwrite: false);
             currentHdr = ownedHdr;
+            diagnostics?.Debug(basename, "MOVE_OK", ("operation", "claim HDR"), ("hdr", currentHdr));
         }
         catch (FileNotFoundException error)
         {
-            return MissingBeforeOwnership(basename, watchMode, error);
+            return MissingBeforeOwnership(basename, watchMode, error, canonicalAuth, "claim HDR");
         }
         catch (Exception error)
         {
+            diagnostics?.Message(basename, "ERROR", canonicalAuth, "HDR_CLAIM_FAILED", "claim HDR",
+                currentHdr, currentEml, ownedHdr, error);
             throw new FatalProcessingException("Cannot make the selected HDR inert: " + ConsoleErrors.Quote(sourceHdr) + " -> " + ConsoleErrors.Quote(ownedHdr), error);
         }
 
         if (holdReason is not null)
         {
+            diagnostics?.Message(basename, "ERROR", canonicalAuth, routeReason, operation,
+                currentHdr, currentEml, destination, holdReason);
             ReportFailure(basename, "The HDR was held because safe routing could not be established.", operation,
                 currentHdr, currentEml, destination, canonicalAuth, holdReason);
             return MessageOutcome.Failed;
@@ -111,20 +132,30 @@ public sealed class SorterProcessor
             {
                 operation = "create process queue directory";
                 destination = destinationDirectory;
+                diagnostics?.Debug(basename, "CREATE_DIRECTORY", ("path", destinationDirectory));
                 Directory.CreateDirectory(destinationDirectory);
             }
 
             operation = "move EML";
             destination = Path.Combine(destinationDirectory, basename + ".eml");
+            diagnostics?.Debug(basename, "MOVE_INTENT", ("operation", operation), ("source", sourceEml), ("destination", destination));
             File.Move(sourceEml, destination, overwrite: false);
             currentEml = destination;
+            diagnostics?.Debug(basename, "MOVE_OK", ("operation", operation), ("eml", currentEml));
             operation = "publish HDR";
             destination = Path.Combine(destinationDirectory, basename + ".hdr");
+            diagnostics?.Debug(basename, "MOVE_INTENT", ("operation", operation), ("source", ownedHdr), ("destination", destination));
             File.Move(ownedHdr, destination, overwrite: false);
+            currentHdr = destination;
+            diagnostics?.Debug(basename, "MOVE_OK", ("operation", operation), ("hdr", currentHdr));
+            diagnostics?.Message(basename, divert ? "DIVERT" : "PASS", canonicalAuth, routeReason,
+                operation, currentHdr, currentEml, destination);
             return MessageOutcome.Succeeded;
         }
         catch (Exception error)
         {
+            diagnostics?.Message(basename, "ERROR", canonicalAuth, "HANDOFF_FAILED", operation,
+                currentHdr, currentEml, destination, error);
             ReportFailure(basename, "The sorter could not complete the owned message's handoff.", operation,
                 currentHdr, currentEml, destination, canonicalAuth, error);
             return MessageOutcome.Failed;
@@ -153,13 +184,16 @@ public sealed class SorterProcessor
     }
 
     // Treat a missing unowned HDR as stale only when it came from watch discovery.
-    private MessageOutcome MissingBeforeOwnership(string basename, bool watchMode, Exception error)
+    private MessageOutcome MissingBeforeOwnership(string basename, bool watchMode, Exception error, string? auth, string operation)
     {
         if (watchMode)
         {
+            diagnostics?.Debug(basename, "STALE", ("operation", operation));
             return MessageOutcome.Stale;
         }
 
+        diagnostics?.Message(basename, "ERROR", auth, "MISSING_HDR", operation,
+            Path.Combine(inputDirectory, basename + ".hdr"), Path.Combine(inputDirectory, basename + ".eml"), error: error);
         ConsoleErrors.WriteException(standardError,
             new FileNotFoundException("The requested plain HDR was not available for " + basename + ".", error));
         return MessageOutcome.Failed;

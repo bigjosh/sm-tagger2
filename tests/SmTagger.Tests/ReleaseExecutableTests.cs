@@ -105,6 +105,56 @@ public sealed class ReleaseExecutableTests
         Assert.False(tagger.Process.HasExited);
     }
 
+    // Flushes one result per message while a real sorter watcher keeps its append log and verbose console active.
+    [ReleaseFact]
+    public async Task PublishedSorterWatcherFlushesResultsForBacklogAndNewArrival()
+    {
+        using var fixture = new ProcessorFixture();
+        string logfile = Path.Combine(fixture.Root, "sorter watch.log");
+        var backlog = fixture.WriteMessage("watch-startup", ProcessorFixture.Header(auth: "not-enrolled@example.com"));
+        MoveToSorter(fixture, "watch-startup");
+        using var sorter = Start("sm-sorter", fixture,
+            [fixture.DataDirectory, "-l", logfile, "-v", fixture.SpoolDirectory]);
+        await WaitUntilAsync(() => File.Exists(logfile) &&
+            ReadSharedText(logfile).Contains("basename=\"watch-startup\" result=PASS", StringComparison.Ordinal) &&
+            ReadSharedText(logfile).EndsWith("\r\n", StringComparison.Ordinal), sorter);
+
+        string firstRecord = ReadSharedText(logfile);
+        Assert.EndsWith("\r\n", firstRecord);
+        Assert.Single(firstRecord.Split("\r\n", StringSplitOptions.RemoveEmptyEntries));
+        Assert.Equal(backlog.Hdr, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "watch-startup.hdr")));
+        Assert.Equal(backlog.Eml, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "watch-startup.eml")));
+        Assert.False(sorter.Process.HasExited);
+
+        var arrival = fixture.WriteMessage("watch-arrival");
+        MoveToSorter(fixture, "watch-arrival");
+        await WaitUntilAsync(() => ReadSharedText(logfile)
+            .Contains("basename=\"watch-arrival\" result=DIVERT", StringComparison.Ordinal) &&
+            ReadSharedText(logfile).EndsWith("\r\n", StringComparison.Ordinal), sorter);
+
+        string liveLog = ReadSharedText(logfile);
+        string[] records = liveLog.Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
+        Assert.StartsWith(firstRecord, liveLog);
+        Assert.EndsWith("\r\n", liveLog);
+        Assert.Equal(2, records.Length);
+        Assert.Contains("result=PASS", records[0]);
+        Assert.Contains("result=DIVERT", records[1]);
+        Assert.DoesNotContain("event=", liveLog);
+        Assert.Equal(arrival.Hdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "watch-arrival.hdr")));
+        Assert.Equal(arrival.Eml, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "watch-arrival.eml")));
+        Assert.False(sorter.Process.HasExited);
+
+        sorter.Stop();
+        string output = await sorter.Output.WaitAsync(TimeSpan.FromSeconds(10));
+        string error = await sorter.Error.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Empty(error);
+        Assert.Contains("DEBUG", output);
+        Assert.Contains("event=STARTUP", output);
+        Assert.Contains("event=QUEUE_SCAN", output);
+        Assert.Contains("event=MOVE_OK", output);
+        Assert.Contains("result=PASS", output);
+    }
+
     // Killing the actual release process during fan-out leaves inert work that restart must not replay.
     [ReleaseFact]
     public async Task ForcedTerminationDuringFanOutReloadsMappingsWithoutResumingMail()

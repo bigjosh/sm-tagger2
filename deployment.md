@@ -56,17 +56,21 @@ Verify the deployment's EML-first/HDR-last readiness behavior, admission limits,
 Start each watcher independently, supplying your approved paths. These examples place the standalone EXEs together in `D:\sm-tagger-bin`; for application-folder deployments, include the corresponding `sm-sorter` or `sm-tagger` subdirectory:
 
 ```powershell
-& 'D:\sm-tagger-bin\sm-sorter.exe' 'D:\sm-tagger-data' 'D:\SmarterMail\Spool'
+& 'D:\sm-tagger-bin\sm-sorter.exe' 'D:\sm-tagger-data' -l 'D:\sm-tagger-data\sorter-mail.log' -v 'D:\SmarterMail\Spool'
 & 'D:\sm-tagger-bin\sm-tagger.exe' 'D:\sm-tagger-data' -log 'D:\SmarterMail\Spool'
 ```
 
-Each command is a long-running console process; use separate consoles or independently supervised jobs. These are not native Windows services. A host must capture standard error and use a supported Ctrl+C/Ctrl+Break console event for orderly shutdown; terminating the process otherwise has crash semantics. Task Scheduler/service-wrapper behavior still needs verification on the chosen deployment host.
+Each command is a long-running console process; use separate consoles or independently supervised jobs. These are not native Windows services. A host must capture standard error and use a supported Ctrl+C/Ctrl+Break console event for orderly shutdown; terminating the process otherwise has crash semantics. Capture sorter standard output too when `-v` is enabled. Task Scheduler/service-wrapper behavior still needs verification on the chosen deployment host.
+
+Sorter `-l <logfile>` appends one UTF-8 terminal result line per attempted message, including UTC time, basename, auth when known, reason, and known file locations. `PASS` means unchanged publication to the spool completed; `DIVERT` means handoff to the tagger queue completed; `ERROR` means sorting failed. These are sorter outcomes, not delivery receipts. The log contains no startup, shutdown, or scan records, and a stale watcher HDR that vanishes before ownership gets no record. An explicitly requested missing one-shot message does get an `ERROR` record.
+
+Sorter `-v` independently writes lifecycle, scan, routing, and file-operation debugging to standard output. Errors always go to standard error. Put sorter options after the datadir and before the spooldir, in either order and at most once each. Prefer an absolute log path; relative paths resolve against the process working directory. Create the log's parent directory yourself, use a dedicated file separate from mail and the tagger's `log.txt`, and protect the unredacted output. There is no automatic directory creation, rotation, truncation, repair, or retry for the email log.
 
 For a controlled one-shot test, append the exact plain-message basename. Tagger options appear immediately after the datadir. A leading dash in the basename is allowed. One-shot execution cannot overlap a watcher of the same role. `-keep` retains parent `.in` and final `.out` evidence. The source EML body and unsupported headers are always preserved.
 
 ## Observe failures
 
-Logging is best effort. A trace or tag-log failure prints to standard error and the same current message continues. Corrupt and missing logs are accepted. A successful delivery attempt may therefore have no log record, and a recorded publication attempt does not prove delivery.
+Logging is best effort. A sorter email-log, console-debug, tagger trace, or tag-log failure does not change the mail outcome. File logging failures print to standard error and the same current message continues. A failed sorter email log or tagger execution trace is disabled for the rest of that invocation; a later invocation may try again. Corrupt and missing logs are accepted. A successful operation may therefore have no log record, and even a successful sorter result does not prove delivery.
 
 Mail-contract and processing errors retain inert files and attempt a parent diagnostic. Sorter failures after ownership retain `.hdr.sort` plus the EML at its actual location and attempt a `.sort.err` diagnostic. Activated `From:` count failures retain original `.hdr.err`/`.eml.err` pairs when both retention moves succeed. Other tagger failures retain the actual `.start`, `.break`, `.process`, or `.pend` states. Edited/synthesized header lines above 998 bytes reject the parent before any child publication. Publication errors may leave earlier children live and later children pending; use the parent diagnostic and exact paths to reconcile that state.
 

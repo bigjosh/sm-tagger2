@@ -5,16 +5,83 @@ namespace SmTagger.Tests;
 public sealed class InvocationTests
 {
     // Preserve a leading-hyphen basename rather than interpreting it as a sorter option.
-    [Fact]
-    public void SorterAcceptsLiteralHyphenBasename()
+    [Theory]
+    [InlineData("-log")]
+    [InlineData("-l")]
+    [InlineData("-v")]
+    public void SorterAcceptsLiteralHyphenBasename(string basename)
     {
-        Invocation result = Invocation.ParseSorter(["data", "spool", "-log"]);
-        Assert.Equal("-log", result.Basename);
+        Invocation result = Invocation.ParseSorter(["data", "spool", basename]);
+        Assert.Equal(basename, result.Basename);
         Assert.False(result.IsWatchMode);
         Assert.False(result.Log);
         Assert.False(result.Keep);
+        Assert.Null(result.SorterLogPath);
+        Assert.False(result.Verbose);
         Assert.True(Path.IsPathFullyQualified(result.DataDirectory));
         Assert.True(Path.IsPathFullyQualified(result.SpoolDirectory));
+    }
+
+    // Accept sorter-only flags in either order before spooldir and resolve the explicit logfile once.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SorterParsesLogAndVerboseOptionsInEitherOrder(bool verboseFirst)
+    {
+        string logfile = Path.Combine("diagnostics", "sorter trace.txt");
+        string[] arguments = verboseFirst
+            ? ["data", "-v", "-l", logfile, "spool", "message"]
+            : ["data", "-l", logfile, "-v", "spool", "message"];
+
+        Invocation result = Invocation.ParseSorter(arguments);
+
+        Assert.Equal(Path.GetFullPath(logfile), result.SorterLogPath);
+        Assert.True(result.Verbose);
+        Assert.Equal(Path.GetFullPath("spool"), result.SpoolDirectory);
+        Assert.Equal("message", result.Basename);
+        Assert.False(result.Log);
+        Assert.False(result.Keep);
+    }
+
+    // Keep file logging and stdout verbosity independent without consuming a final flag-shaped basename.
+    [Fact]
+    public void SorterDiagnosticFlagsAreIndependentAndStopAtSpoolDirectory()
+    {
+        Invocation fileOnly = Invocation.ParseSorter(["data", "-l", "sorter.log", "spool", "-v"]);
+        Assert.Equal(Path.GetFullPath("sorter.log"), fileOnly.SorterLogPath);
+        Assert.False(fileOnly.Verbose);
+        Assert.Equal("-v", fileOnly.Basename);
+
+        Invocation verboseOnly = Invocation.ParseSorter(["data", "-v", "spool", "-l"]);
+        Assert.Null(verboseOnly.SorterLogPath);
+        Assert.True(verboseOnly.Verbose);
+        Assert.Equal("-l", verboseOnly.Basename);
+
+        Invocation watcher = Invocation.ParseSorter(["data", "-v", "-l", "sorter.log", "spool"]);
+        Assert.True(watcher.IsWatchMode);
+        Assert.True(watcher.Verbose);
+        Assert.Equal(Path.GetFullPath("sorter.log"), watcher.SorterLogPath);
+    }
+
+    // Reject missing operands, repeated sorter options, and options misplaced after the spool argument.
+    [Fact]
+    public void InvalidSorterDiagnosticOptionsFailInvocation()
+    {
+        string[][] invalidArguments =
+        [
+            ["data", "-l"],
+            ["data", "-l", "sorter.log"],
+            ["data", "-l", "-v", "spool"],
+            ["data", "-v"],
+            ["data", "-v", "-l"],
+            ["data", "-l", "", "spool"],
+            ["data", "-v", "-v", "spool"],
+            ["data", "-l", "first.log", "-l", "second.log", "spool"],
+            ["data", "-v", "-l", "sorter.log", "-v", "spool"],
+            ["data", "spool", "-l", "sorter.log"]
+        ];
+
+        Assert.All(invalidArguments, arguments => Assert.Throws<ArgumentException>(() => Invocation.ParseSorter(arguments)));
     }
 
     // Recognize only flags before spooldir and leave later hyphens as literal message names.
@@ -25,6 +92,8 @@ public sealed class InvocationTests
         Assert.True(result.Log);
         Assert.True(result.Keep);
         Assert.Equal("-keep", result.Basename);
+        Assert.Null(result.SorterLogPath);
+        Assert.False(result.Verbose);
     }
 
     // Omitting the optional basename selects the long-running discovery mode.

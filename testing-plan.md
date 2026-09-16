@@ -16,11 +16,11 @@ Three optional local compatibility tests read private captures from `samples/` w
 The executable contracts are:
 
 ```text
-sm-sorter.exe <datadir> <spooldir> [<basename>]
+sm-sorter.exe <datadir> [-l <logfile>] [-v] <spooldir> [<basename>]
 sm-tagger.exe <datadir> [-log] [-keep] <spooldir> [<basename>]
 ```
 
-Capture before/after directory inventories and exact HDR/EML bytes, exit codes, and standard error. Hash untouched bodies and pass-through pairs. Logs are supplementary evidence: their absence, corruption, or failed writes do not prove mail failed. Inspect retained file states and the independent receiver for publication/delivery outcomes.
+Capture before/after directory inventories and exact HDR/EML bytes, exit codes, standard error, sorter stdout with `-v`, and its email log with `-l`. Hash untouched bodies and pass-through pairs. Logs are supplementary evidence: their absence, corruption, or failed writes do not prove mail failed. Inspect retained file states and the independent receiver for publication/delivery outcomes.
 
 ## Deterministic contract cases
 
@@ -41,7 +41,7 @@ Capture before/after directory inventories and exact HDR/EML bytes, exit codes, 
 
 | Case | Required checks |
 |---|---|
-| INT-001: Invocation and ownership | Missing/excess arguments and options without spooldir print one usage block with argument/mode hints and examples, exit 1, and leave queues/configuration unchanged without creating locks; literal basename validation including leading dash; option order; one-shot/watch differences; second same-role invocation denied before protected work; independent sorter/tagger concurrency; vanished pre-claim HDR; first ownership failure versus message-local EML claim failure. |
+| INT-001: Invocation and ownership | Missing/excess arguments and options without spooldir print one usage block with argument/mode hints and examples, exit 1, and leave queues/configuration unchanged without creating locks; sorter `-l`/`-v` separately and in either order immediately after datadir, missing log value, duplicate options, relative log resolution, and dash-prefixed basename after spooldir; unchanged tagger option contract; one-shot/watch differences; second same-role invocation denied before protected work or email-log access; independent sorter/tagger concurrency; vanished pre-claim HDR; first ownership failure versus message-local EML claim failure. |
 | INT-002: Visibility and construction | HDR-first ownership; EML-first/HDR-last handoff and publication; no replacement of existing artifacts; all intended children complete before any publication; `-keep` source copies and all child `.out` copies completed at their specified points. Inject failures during writes, close/dispose, copies, and readiness moves. |
 | INT-003: `From:` contract-error artifacts | With successful error handling, retain originals as `<basename>.hdr.err` and `<basename>.eml.err`, plus `<basename>.err` diagnostic. Verify HDR-first transition from `.start`, exact original bytes, no overwrite, no tags/children/publication, watch continuation, and one-shot nonzero. A failed error-state rename retains its actual partial state per the specification. These suffixed originals remain inert after restart. |
 | INT-004: Partial publication and cleanup | Fail a selected EML move or HDR move after earlier children publish. Earlier children are possibly sent; no later child is attempted; partial locations and parent evidence match the specification. Test failure deleting a remaining parent, already-absent parent cleanup success, and no automatic rollback/retry. |
@@ -54,11 +54,14 @@ Capture before/after directory inventories and exact HDR/EML bytes, exit codes, 
 
 Logging is never a mail-success prerequisite. Test against both fresh and existing mappings and confirm the **same current message/child continues** after a logging-only failure; checking only a later message would miss this contract.
 
-- `LOG-001`: Without `-log`, neither program touches `log.txt`, even when it is corrupt, absent, or inaccessible. The sorter has no dependency on tagger logs.
+- `LOG-001`: Without `-log`, the tagger never touches its `log.txt`, even when it is corrupt, absent, or inaccessible. Without `-l`, the sorter accesses no email log; without `-v`, it emits no debug output. The sorter has no implicit dependency on tagger logs, configuration, mappings, or EML contents.
 - `LOG-002`: With `-log`, check new event formatting, escaped controls, sequence/context, and honest intent/result state. Fail open/write/flush/dispose at meaningful points: report to standard error, disable the file trace for the rest of that invocation, and continue the same mail operation. A logging-only failure does not change its success exit code.
 - `LOG-003`: Accept absent, unreadable, malformed, or incomplete diagnostic log contents without invalidating a profile/mapping or blocking startup. Append new entries without reading, repairing, truncating, or adding recovery separators to existing bytes. A newly allocated mapping remains publishable when best-effort empty tag-log creation fails.
 - `LOG-004`: For a child using individual and group tags, attempt each distinct tag-log append in ordinal tag-address order immediately before publication. Fail one append and verify standard error, remaining append attempts, and the same child's EML/HDR publication continue. Preserve any partial bytes. A later fresh message naturally attempts the affected tag log again.
 - `LOG-005`: Fail parent diagnostic output and standard error as well as file logging. Preserve the underlying mail result and actual residual state; do not introduce recursive logging, a second fallback system, or an automatic repair attempt. A real mail/configuration failure still has its specified failure scope even if its diagnostic cannot be written.
+- `LOG-006`: Sorter email-log records contain exactly one terminal `PASS`, `DIVERT`, or `ERROR` per attempted message, with UTC timestamp, escaped basename/auth/reason, and actual known file locations. Cover no-auth, non-enrolled and enrolled routing, unsafe HDR, unreadable enrollment, missing EML, partial handoff, explicit missing one-shot HDR, and fatal HDR ownership failure. Suppress records for stale watcher entries and all lifecycle/scan activity. Append UTF-8 without BOM plus CRLF, preserve corrupt/partial existing bytes, and never read or repair old log contents.
+- `LOG-007`: Fail sorter email-log formatting/open/append/flush/close, including a missing parent directory. Report to stderr, disable only that file for the invocation, and preserve the current message's result, later mail processing, and exit status. Verify no parent creation, rotation, retry, or recursive fallback; a later invocation may open the log afresh. Independently fail verbose console output without affecting mail or the email log.
+- `LOG-008`: With sorter `-v`, verify stdout lifecycle, scans, routing decisions, file operations, stale-entry debugging, and shutdown; stderr still carries errors with or without either flag. Test `-l` alone, `-v` alone, both, and neither in one-shot and watcher modes, including the published executables. Confirm debugging adds no EML reads or tagger-only dependencies.
 
 ## Deployment laboratory
 

@@ -72,7 +72,7 @@ These may be separate projects or clearly separated namespaces in a small number
 
 Open the persistent lock file with `FileMode.OpenOrCreate`, read/write access, and `FileShare.None`, and retain the `FileStream` for the lifetime of the invocation. This provides the required cross-process singleton. The lock filename remains on disk after exit; ownership is the open handle, not file existence.
 
-Acquire the lock before configuration loading, queue scanning, or opening optional `log.txt`. There is no need for an additional named mutex or in-process lock around protected state.
+Acquire the lock before configuration loading, queue scanning, or opening either the requested sorter email log or the tagger's optional `log.txt`. There is no need for an additional named mutex or in-process lock around protected state.
 
 ### 4.2 Files and directories
 
@@ -130,13 +130,15 @@ One-shot mode constructs no watcher.
 
 ### 4.6 Log files
 
-Only the singleton tagger writes `log.txt` and tag logs. Other processes may read them but concurrent external writes while the tagger runs are unsupported.
+Keep the sorter's small diagnostic writer in the sorter project; do not reference tagger `TraceLog`, configuration, mapping, or EML parsing code. With `-l`, open the operator-selected email log after acquiring the sorter singleton and retain its append stream for the invocation. Resolve relative paths from the working directory, use UTF-8 without a BOM plus CRLF, and flush each terminal record. Do not create parent directories or inspect existing log bytes. Formatting/open/append/flush/dispose failures report to stderr, disable that file for the invocation, and preserve current and subsequent mail processing. Never rotate, repair, reopen, or retry it during that invocation. With `-v`, emit escaped lines prefixed `DEBUG` to stdout independently, with event fields for lifecycle/operations and result fields for terminal message summaries; a console failure disables only debugging and attempts a stderr report.
+
+Only the singleton tagger writes its `log.txt` and tag logs. Other processes may read them but concurrent external writes while the tagger runs are unsupported. The sorter email log is a separate operator-selected file with the same no-concurrent-writers expectation.
 
 When `-log` is requested, attempt to open `log.txt` once in append mode with write access and `FileShare.Read`. Encode each event as UTF-8 without BOM plus CRLF, write it as one application-level buffer, and attempt to flush managed buffering before the related state mutation proceeds. If opening, encoding, writing, flushing, or disposing fails, report the operation and error to standard error and disable file tracing for the rest of the invocation. Dispose an acquired failed writer on a best-effort basis; its cleanup must not throw into the mail-processing boundary. Do not reopen or retry it in that invocation. Startup, current mail, later mail, and shutdown continue normally.
 
 For a tag log, use append mode with write access and `FileShare.Read`, creating a missing file when possible. Encode, append, flush, and dispose the entry before attempting the child's EML move. Catch logging-operation exceptions, report them to standard error, and continue the remaining distinct tag logs in ordinal tag-address order and then the same child's publication. Do not retry a failed entry for that child; later children and messages attempt their own entries normally. Empty tag-log creation during mapping allocation uses the same nonblocking error policy.
 
-For both log kinds, append without reading, decoding, or validating prior contents. Accept missing, corrupted, and unterminated logs. Do not repair or truncate them, insert recovery separators, or mark a mapping unusable because of logging. Do not inspect tag-log presence or accessibility at startup. Log formatting and I/O errors must not escape into mapping, message, or startup failure handling. Standard-error reporting is itself best effort, with no recursive fallback.
+For every file log, append without reading, decoding, or validating prior contents. Accept missing, corrupted, and unterminated logs. Do not repair or truncate them, insert recovery separators, or mark a mapping unusable because of logging. Do not inspect tag-log presence or accessibility at startup. Log formatting and I/O errors must not escape into mapping, message, or startup failure handling. Standard-error reporting is itself best effort, with no recursive fallback.
 
 Do not promise one native write call or expose native close status. Each logging call reports its own managed operation failure without changing mail decisions or exit status. A publication-attempt entry is optional diagnostic evidence; a successful child may have no recorded entry.
 
@@ -194,12 +196,15 @@ Precompute the complete child plan and all byte edits before publishing any chil
 
 After acquiring the sorter singleton in watch mode, enumerate direct sorter-owned residuals such as `.hdr.sort` and `.sort.err` in `proc` and report them to standard error without opening, repairing, or removing them. Then begin the ordinary plain-HDR scan. One-shot mode acts only on its requested plain basename and is not a residual-reporting or repair command.
 
+Open the requested email log only after singleton acquisition. When verbose output is enabled, report startup/shutdown, queue scans, classification/routing, file-operation intents/results, stale entries, and terminal outcomes through stdout debugging. Keep these process/operation events out of the email log; its records follow `spec.md` §5.1 exactly.
+
 For each selected plain HDR:
 
 1. Read it and run the shared fast classifier without opening the EML. Treat a non-missing read failure as `Hold`; do not let a read exception bypass the normal ownership attempt and leave an ambiguous live HDR behind.
 2. Convert the result and auth-index lookup into one of `Pass`, `Divert`, or `Hold`.
 3. Claim the HDR by moving it to `.hdr.sort`.
 4. On `Pass`, move EML then HDR to the spool root. On `Divert`, move EML then HDR to `process`. On `Hold`, leave the claimed pair in place and write the diagnostic.
+5. Attempt exactly one terminal email-log record: `PASS` or `DIVERT` only after the complete corresponding handoff, otherwise `ERROR` with the applicable reason and known paths. Keep the attempt best effort even when processing must throw a fatal ownership error. An explicitly missing one-shot HDR receives `ERROR`; a stale watcher entry receives debug output only.
 
 The auth lookup is a simple read-only directory lookup. Apply the literal-component predicate before constructing an address-derived path. For an enrollable auth, establish that `senders` is accessible and a directory, then call `File.GetAttributes` for the one canonical child. Under the stopped-administrator trust rule, `FileNotFoundException` or `DirectoryNotFoundException` for that child means absence; an existing non-directory or any other exception means `Hold`. The trusted administrator and enforced sorter singleton mean no handle-relative lookup or race-reconciliation layer is needed.
 
@@ -254,7 +259,7 @@ Define a few domain exceptions or result types only where they clarify the speci
 
 Do not wrap every framework exception. At the message boundary, add the basename, current state, and relevant path/operation before attempting the diagnostic. A `From:` contract error uses the specifically defined `.hdr.err`/`.eml.err` retention path and must also be reported to standard error and the requested trace when available. An output-header-length contract error retains the normal `.break`/inert-child states and reports the child, field, physical-line position, measured length, limit, and retained paths through the parent `.err`, requested trace, and standard error. At the executable boundary, print the complete exception chain to standard error and return nonzero when the specification classifies the underlying failure as fatal. Catch logging and diagnostic-file failures within their output paths, report them to standard error, and preserve the underlying mail outcome.
 
-Optional verbose logging records decisions and state transitions, not every local variable or framework call. Before a persistent mutation, attempt an intent event containing the operation and expected state change. After it returns, attempt its success/failure and known resulting state. These attempts are best effort and never gate the operation. The two specification exceptions are intentional: never recursively log `log.txt`'s own writes, and do not log `-keep` copy operations. Use ordinary operation names such as `move`, `create`, `append`, `copy`, and `delete`; include the managed exception type, HRESULT, message, and paths when useful. Never report a state that is not known.
+The tagger's optional execution trace records decisions and state transitions, not every local variable or framework call. Before a persistent mutation, attempt an intent event containing the operation and expected state change. After it returns, attempt its success/failure and known resulting state. These attempts are best effort and never gate the operation. The two specification exceptions are intentional: never recursively log `log.txt`'s own writes, and do not log `-keep` copy operations. Use ordinary operation names such as `move`, `create`, `append`, `copy`, and `delete`; include the managed exception type, HRESULT, message, and paths when useful. Never report a state that is not known. Sorter `-v` provides its separate console debugging; sorter `-l` contains only terminal message records.
 
 Do not add automatic retries except for explicitly specified tag-address collisions. Do not roll back a moved EML, automatically resume residual work, or clean inert evidence.
 
@@ -270,6 +275,7 @@ Testing should establish behavior without forcing production code into a simulat
 - Test singleton contention and `FileSystemWatcher` behavior as Windows integration tests rather than emulating every internal operating-system result.
 - Test exceptions at meaningful application boundaries. Do not require an injectable wrapper around every `File`, `Directory`, or `FileStream` call solely to manufacture impossible native return combinations.
 - Verify that missing/inaccessible tag logs do not block startup or mapping reuse; empty-log creation and append/encoding/flush/dispose failures do not block mapping allocation, the same child's publication, later children, parent cleanup, or a successful one-shot exit. A failed requested trace disables only that trace for the invocation. Malformed bytes and partial tails are accepted without alteration. Verify standard-error reporting, including when logging fails while reporting a real `From:` contract error.
+- Verify sorter `-l`/`-v` independently and together, exact terminal records and stale-entry suppression, escaped output, partial handoff paths, and the fatal ownership/missing one-shot outcomes. Fail email-log formatting/open/append/flush/dispose and debug stdout separately; preserve the same message result and later processing, without parent creation or automatic retry. Exercise the CLI ordering and both published distribution forms without introducing tagger-only dependencies.
 - Run black-box tests against the exact release executables.
 - Keep real SmarterMail, DNS, SMTP capture, DKIM/DMARC, client, and provider verification in the external laboratory described by `testing-plan.md` and `assumptions.md`.
 

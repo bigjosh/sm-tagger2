@@ -114,7 +114,7 @@ Parsing, classification, mapping, rewriting, ordering, and state decisions must 
 **SmarterMail invokes neither executable.** Version 1 uses two console executables run by hand or hosted as independent long-running processes by Task Scheduler or an external service wrapper. Neither is a native Windows Service Control Manager service; that integration is deferred to FUT-004 in `future.md`. Each file watcher is inside its executable rather than a launcher for per-message processes.
 
 ```
-sm-sorter.exe <datadir> <spooldir> [<basename>]
+sm-sorter.exe <datadir> [-l <logfile>] [-v] <spooldir> [<basename>]
 sm-tagger.exe <datadir> [-log] [-keep] <spooldir> [<basename>]
 ```
 
@@ -124,12 +124,14 @@ sm-tagger.exe <datadir> [-log] [-keep] <spooldir> [<basename>]
 | `<spooldir>` | the SmarterMail spool folder. The sorter input is `<spooldir>\proc\`; both executables publish final mail into `<spooldir>\` |
 | sorter `<basename>` | **optional.** Given, sort that one plain pair from `proc\` and exit. Omitted, watch `proc\` |
 | tagger `<basename>` | **optional.** Given, handle that one plain pair from `<datadir>\process\` and exit. Omitted, watch `process\` |
+| `-l <logfile>` | sorter only: append one best-effort terminal result per attempted message to the selected email log (§5.1) |
+| `-v` | sorter only: write verbose lifecycle, scan, routing, and file-operation debugging to standard output (§5.1) |
 | `-keep` | tagger only: retain copies of original and resultant files in `process\` as `.in` and `.out` |
 | `-log` | tagger only: create/open `<datadir>\log.txt` and emit the execution trace in §5.1 |
 
-Tagger options must appear directly after `<datadir>` to avoid confusion with basenames that may start with a dash. The sorter has no options, persistent log, full EML parser, tag mapping, or sender-profile loader. Its diagnostics are the sorter-owned HDR suffix, a best-effort parent `.sort.err`, and standard error.
+Each program's options must appear directly after `<datadir>`, before `<spooldir>`, to avoid confusion with basenames that may start with a dash. Sorter `-l <logfile>` and `-v` are independent, may appear in either order, and may each appear at most once. The log path is required after `-l`; a relative path resolves against the process working directory. Tagger `-log` and `-keep` retain their separate meanings. The sorter has its own small diagnostic writer and no dependency on the tagger's execution trace, full EML parser, tag mapping, or sender-profile loader. Its retained HDR suffix, best-effort parent `.sort.err`, and standard-error diagnostics remain available without either sorter option.
 
-An invalid argument count or other argument-validation error prints a concise error, one usage block, argument descriptions, and quoted-path examples to standard error, then exits with status 1 before acquiring a singleton or touching queue files. The hints explain that omitting `<basename>` starts watch mode and show the tagger option order.
+An invalid argument count or other argument-validation error prints a concise error, one usage block, argument descriptions, and quoted-path examples to standard error, then exits with status 1 before acquiring a singleton, opening a requested log, or touching queue files. The hints explain that omitting `<basename>` starts watch mode and show the applicable option order.
 
 A command-line `<basename>` is one nonempty literal Windows filename component, not a path; leading hyphens are permitted. A value containing a separator, rooted/drive syntax, a reserved or otherwise unusable component spelling, or `.`/`..` is an invocation failure before any queue message is touched. Watch mode obtains basenames only from direct-directory enumeration.
 
@@ -137,7 +139,7 @@ A command-line `<basename>` is one nonempty literal Windows filename component, 
 
 For either executable, the presence of `<basename>` selects one-shot mode; omission selects watch mode. One-shot mode follows that executable's normal input and state rules and is not a repair/retry command. It never resumes a suffixed sorter or tagger state.
 
-Without tagger `-log`, neither executable creates, opens, inspects, appends, rotates, truncates, or deletes `log.txt`. Sorter operation is independent of tagger `log.txt`; a tagger log failure cannot stop sorting.
+Without tagger `-log`, the tagger never creates, opens, inspects, appends, rotates, truncates, or deletes its `log.txt`. Without sorter `-l`, the sorter opens no email log; without sorter `-v`, it emits no debug output. Sorter operation has no implicit dependency on tagger `log.txt`; a tagger log failure cannot stop sorting. The operator selects a dedicated sorter log file separate from mail, configuration, mapping records, and the tagger's trace.
 
 A sorter singleton/watcher failure returns nonzero and stops all flow through the selected `proc\`. A failure confined to one sorter-owned message leaves that message inert and does not stop the sorter from handling later plain HDRs. Tagger lock/configuration startup failure or fatal watcher failure returns nonzero but does not affect the independent sorter; enrolled mail remains in `process\` while unrelated mail continues. Logging failures print to standard error and do not stop either process, hold the current message, or change its exit status. One-shot mode returns nonzero when its requested message does not complete successfully for a mail-processing or contract reason.
 
@@ -267,7 +269,21 @@ Write auth-address index, sender-id, and tag-address folder names in canonical l
 
 **Best-effort logs and accepted corruption.** Logging is diagnostic and must not control mail flow. A failure to create, open, encode, write, flush, or close a log prints to standard error and processing continues with the current message and later work. It never causes a message hold, process termination, failed mapping allocation, or nonzero exit by itself. The formats below define new entry bytes, not an integrity requirement on existing contents. Corrupted logs—including malformed UTF-8, incomplete lines, and entries joined by a later append to an unfinished line—are acceptable in version 1. This loss of diagnostic quality is preferable to the complexity of validation, repair, recovery separators, or tracking unusable mappings. Append at the existing end without reading or validating prior contents. Do not repair corruption or block work because a log is absent or unusable. Logs remain diagnostic evidence, never mapping or message-state authority.
 
-**`log.txt`** — the optional append-only operational execution trace. It exists as a program output only when `-log` is present. Encode each new event as UTF-8 without a BOM and terminate it with CRLF. Every new event begins with this stable, searchable prefix and may continue with any number of human-readable `name=value` details:
+**Sorter email log (`-l <logfile>`)** — an optional append-only record of terminal sorter outcomes. After acquiring the sorter singleton, attempt to open the selected file for the invocation. Do not create its parent directory. For each attempted input message, attempt one UTF-8 line without a BOM, terminated by CRLF, with this field order:
+
+```text
+<UTC timestamp> basename="..." result=PASS|DIVERT|ERROR auth="..." reason="..." operation="..." hdr="..." eml="..." destination="..." error="..."
+```
+
+The timestamp format is `yyyy-MM-ddTHH:mm:ss.fffZ`. Quote and escape string values using the rules below; use `"-"` for unavailable values. `auth` is the canonical authenticated address when known. `hdr` and `eml` name the last-known/current message paths; `destination` names the attempted destination when applicable. These fields describe known state and attempted operations, not a fresh existence check. `error` preserves the applicable error detail when available.
+
+`PASS` is recorded only after unchanged publication into the spool completes; its reason is `NO_AUTH`, `UNENROLLED_AUTH`, or `UNENROLLABLE_AUTH`. `DIVERT` is recorded only after handoff into `process` completes, with reason `ENROLLED_AUTH`. `ERROR` records the failed terminal outcome, with reason `UNSAFE_HDR`, `AUTH_LOOKUP_FAILED`, `HDR_READ_FAILED`, `HDR_CLAIM_FAILED`, `HANDOFF_FAILED`, or `MISSING_HDR` as applicable. A fatal failure to claim a selected HDR and an explicitly requested missing one-shot HDR receive an `ERROR` attempt. A watcher entry that disappears before ownership is stale and receives no email-log record. No startup, shutdown, scan, or other process-lifecycle lines are written to this file.
+
+A record is attempted after the message's terminal result is known; a crash or logging failure can leave it absent or partial even after mail has moved. `PASS` and `DIVERT` prove neither final delivery nor downstream tagger success. On formatting, open, append, flush, or close failure, report the log failure to standard error, disable only that file for the rest of the invocation, and preserve the current mail outcome, later processing, and exit status. Do not reopen, retry, rotate, truncate, repair, or recursively log the failure. A later invocation may try opening the file again. Operators may archive or clear it while the sorter is stopped.
+
+**Sorter console debugging (`-v`)** — best-effort standard-output lines prefixed `DEBUG`. Lifecycle, queue scans, routing decisions, file-operation intents/results, and stale entries identify their `event`; a terminal message summary uses the email record's result fields. This output is independent of `-l` and includes no EML contents or tagger-only configuration/mapping inspection. Without `-v`, no debug output is attempted. A console formatting/write failure disables debug output for the invocation and attempts a standard-error report, without affecting mail or the email log. Ordinary errors still go to standard error regardless of both options.
+
+**Tagger `log.txt`** — the optional append-only operational execution trace. It exists as a program output only when tagger `-log` is present. Encode each new event as UTF-8 without a BOM and terminate it with CRLF. Every new event begins with this stable, searchable prefix and may continue with any number of human-readable `name=value` details:
 
 ```
 2026-09-01T14:30:12.123Z run=0d3b3c3d-6ca6-4c11-84a0-b119576fa3c8 seq=42 context="message-42" event=STATE_RESULT step="7.5.2" result=ERROR operation="move" source="D:\\sm-tagger-data\\process\\message-42-1.eml.pend" destination="D:\\SmarterMail\\Spool\\message-42-1.eml" error="destination exists" residual="EML=.eml.pend; HDR=.hdr.pend; later children=.pend; parent=.break"
@@ -277,7 +293,7 @@ Use UTC with exactly millisecond precision for the timestamp. `run` is one fresh
 
 Quote every arbitrary string value. Within it, escape `\` as `\\`, `"` as `\"`, CR as `\r`, LF as `\n`, HTAB as `\t`, and any other control or byte not representable as valid UTF-8 as `\xHH`. Integers and fixed uppercase tokens may be unquoted. These rules prevent newly encoded values from introducing additional physical lines while retaining the complete relevant value; they do not establish the integrity of existing log contents.
 
-`log.txt`, the parent `.err`, retained `-keep` artifacts, and standard-error diagnostics are protected operational data. The program performs **no redaction**. Any current or retired private-address, auth-address, sender-id, recipient-id, tag-address, basename, full path, parsed metadata/header value, error text, or other datum relevant to the event may and should appear. “Relevant” means read, derived, compared, selected, rejected, mutated, or returned by the program; it does not require dumping an EML body or other bytes the program never examines. These outputs are not sanitized or safe for release outside the trusted operator/security zone.
+The sorter email log and console debugging, tagger `log.txt`, parent diagnostics, retained `-keep` artifacts, and standard-error diagnostics are protected operational data. The programs perform **no redaction**. Any current or retired private-address, auth-address, sender-id, recipient-id, tag-address, basename, full path, parsed metadata/header value, error text, or other datum relevant to the event may and should appear. “Relevant” means read, derived, compared, selected, rejected, mutated, or returned by the program; it does not require dumping an EML body or other bytes the program never examines. These outputs are not sanitized or safe for release outside the trusted operator/security zone.
 
 With `-log`, record enough information for a human to reconstruct the path taken: startup/options, configuration loading, queue scans, message ownership, auth/profile selection, important parsed and canonical values, mapping lookup/allocation, branch decisions, child order, publication, shutdown, and failures.
 
@@ -287,7 +303,7 @@ After the tagger singleton is held and before configuration is loaded or message
 
 If opening or using the requested `log.txt` fails, attempt a standard-error diagnostic beginning `ERROR logging to "<full-log-path>":` with the failed event and known residual state when available. Disable file tracing for the rest of that invocation and continue normal startup, current-message processing, later messages, and shutdown. Do not repeatedly reopen or retry the failed trace; a later invocation may try again. A close failure is likewise reported without changing the mail outcome or exit status. Standard error is best effort and is not recursively logged; inability to write it creates no additional fallback. The managed operations used by logging are defined in `implementation.md`.
 
-Independently of `-log`, attempt a complete human-readable standard-error diagnostic for startup/configuration failures, fatal watcher failures, runtime message-contract errors, and all logging or diagnostic-file failures. Standard error is a best-effort operator channel, not a durable journal; inability to write it does not create another fallback. Out-of-band collection and delivery of these messages is deferred to FUT-005 in `future.md`.
+Independently of sorter `-l`/`-v` or tagger `-log`, attempt a complete human-readable standard-error diagnostic for startup/configuration failures, fatal watcher failures, runtime message-contract errors, and all logging or diagnostic-file failures. Standard error is a best-effort operator channel, not a durable journal; inability to write it does not create another fallback. Out-of-band collection and delivery of these messages is deferred to FUT-005 in `future.md`.
 
 **`sender-id.txt`** — In an auth-index directory, points that canonical auth-address to its stable profile. In a tag-address directory, identifies the profile that owns the permanent mapping. In both roles, trim permitted terminal newline bytes, require one canonical lowercase sender-id and no other content, and require that it identifies an existing `profiles\<sender-id>\` directory. The auth-index file is immutable after atomic publication.
 
@@ -797,7 +813,7 @@ Any value used as one literal child name must be one usable Windows path compone
 
 Tag tokens use the cryptographically secure, uniform five-character generation defined in §7.1.4. Their 25-bit size is an accepted attribution limitation, not an authentication mechanism. Private-addresses are also created from a cryptographically secure source during onboarding and kept non-public, but only authenticated enrollment—not possession of that string alone—selects a sender profile.
 
-`log.txt`, parent diagnostics, `-keep` artifacts, and standard error may contain any identity or message metadata useful for diagnosis. They are intentionally unredacted and belong inside the same protected operational boundary as the datadir and spool. Message-derived controls must be escaped so they cannot forge additional diagnostic lines.
+The sorter email log, console debugging, tagger `log.txt`, parent diagnostics, `-keep` artifacts, and standard error may contain any identity or message metadata useful for diagnosis. They are intentionally unredacted and belong inside the same protected operational boundary as the datadir and spool. Message-derived controls must be escaped so they cannot forge additional diagnostic lines.
 ## 11. Concurrency and atomicity
 
 Version 1 has two independent serialization boundaries:

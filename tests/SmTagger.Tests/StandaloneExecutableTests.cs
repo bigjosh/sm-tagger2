@@ -11,6 +11,9 @@ public sealed class StandaloneExecutableTests
     [InlineData("sm-sorter", "empty")]
     [InlineData("sm-sorter", "datadir-only")]
     [InlineData("sm-sorter", "too-many")]
+    [InlineData("sm-sorter", "sorter-log-without-path")]
+    [InlineData("sm-sorter", "sorter-log-without-spool")]
+    [InlineData("sm-sorter", "sorter-verbose-without-spool")]
     [InlineData("sm-tagger", "empty")]
     [InlineData("sm-tagger", "datadir-only")]
     [InlineData("sm-tagger", "too-many")]
@@ -30,6 +33,9 @@ public sealed class StandaloneExecutableTests
             "empty" => [],
             "datadir-only" => [fixture.DataDirectory],
             "too-many" => [fixture.DataDirectory, fixture.SpoolDirectory, "sorter-ready", "extra"],
+            "sorter-log-without-path" => [fixture.DataDirectory, "-l"],
+            "sorter-log-without-spool" => [fixture.DataDirectory, "-l", Path.Combine(fixture.DataDirectory, "sorter.log")],
+            "sorter-verbose-without-spool" => [fixture.DataDirectory, "-v"],
             "log-without-spool" => [fixture.DataDirectory, "-log"],
             "keep-without-spool" => [fixture.DataDirectory, "-keep"],
             "both-flags-without-spool" => [fixture.DataDirectory, "-log", "-keep"],
@@ -65,6 +71,8 @@ public sealed class StandaloneExecutableTests
         else
         {
             Assert.Contains("proc", result.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("[-l <logfile>]", result.Error);
+            Assert.Contains("[-v]", result.Error);
             Assert.DoesNotContain("-log", result.Error);
             Assert.DoesNotContain("-keep", result.Error);
         }
@@ -90,11 +98,131 @@ public sealed class StandaloneExecutableTests
 
         Assert.True(result.ExitCode == 0, result.Error);
         Assert.Empty(result.Error);
+        Assert.Empty(result.Output);
         Assert.Equal(originals.Hdr, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "unrelated.hdr")));
         Assert.Equal(originals.Eml, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "unrelated.eml")));
         Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory));
         Assert.False(Directory.Exists(Path.Combine(fixture.DataDirectory, "tag-addresses")));
+        Assert.False(File.Exists(Path.Combine(fixture.DataDirectory, "log.txt")));
         Assert.Equal(["sm-sorter.exe"], Directory.GetFiles(binaryDirectory).Select(Path.GetFileName));
+    }
+
+    // Appends one PASS record to existing history without enabling verbose stdout or altering mail bytes.
+    [StandaloneFact]
+    public async Task StandaloneSorterAppendsPassLogWithoutVerboseOutput()
+    {
+        using var fixture = new ProcessorFixture();
+        string binaryDirectory = CopyExecutables(fixture, "sm-sorter");
+        string logfile = Path.Combine(fixture.Root, "sorter trace.txt");
+        const string history = "Existing history is not parsed or replaced.";
+        File.WriteAllText(logfile, history + "\r\n", new UTF8Encoding(false));
+        var originals = fixture.WriteMessage("logged-pass", ProcessorFixture.Header(auth: "not-enrolled@example.com"));
+        MoveToSorter(fixture, "logged-pass");
+
+        var result = await RunAsync(binaryDirectory, "sm-sorter", fixture,
+            [fixture.DataDirectory, "-l", logfile, fixture.SpoolDirectory, "logged-pass"]);
+
+        Assert.True(result.ExitCode == 0, result.Error);
+        Assert.Empty(result.Error);
+        Assert.Empty(result.Output);
+        string[] lines = File.ReadAllLines(logfile);
+        Assert.Equal(2, lines.Length);
+        Assert.Equal(history, lines[0]);
+        AssertSorterLogRecord(lines[1], "PASS", "logged-pass");
+        Assert.Contains("auth=\"not-enrolled@example.com\"", lines[1]);
+        Assert.Equal(originals.Hdr, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "logged-pass.hdr")));
+        Assert.Equal(originals.Eml, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "logged-pass.eml")));
+        Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory));
+    }
+
+    // Emits routing and move diagnostics with -v independently of whether an explicit logfile is requested.
+    [StandaloneTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task StandaloneSorterVerboseMovesWorkWithOrWithoutLogfile(bool writeLog)
+    {
+        using var fixture = new ProcessorFixture();
+        string binaryDirectory = CopyExecutables(fixture, "sm-sorter");
+        string logfile = Path.Combine(fixture.Root, "sorter trace.txt");
+        var originals = fixture.WriteMessage("verbose-divert");
+        MoveToSorter(fixture, "verbose-divert");
+        string[] arguments = writeLog
+            ? [fixture.DataDirectory, "-v", "-l", logfile, fixture.SpoolDirectory, "verbose-divert"]
+            : [fixture.DataDirectory, "-v", fixture.SpoolDirectory, "verbose-divert"];
+
+        var result = await RunAsync(binaryDirectory, "sm-sorter", fixture, arguments);
+
+        Assert.True(result.ExitCode == 0, result.Error);
+        Assert.Empty(result.Error);
+        Assert.Contains("DEBUG", result.Output);
+        Assert.Contains("event=ROUTE", result.Output);
+        Assert.Contains("event=MOVE_INTENT", result.Output);
+        Assert.Contains("event=MOVE_OK", result.Output);
+        Assert.Contains("result=DIVERT", result.Output);
+        Assert.Equal(originals.Hdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "verbose-divert.hdr")));
+        Assert.Equal(originals.Eml, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "verbose-divert.eml")));
+        Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
+        if (writeLog)
+        {
+            string record = Assert.Single(File.ReadAllLines(logfile));
+            AssertSorterLogRecord(record, "DIVERT", "verbose-divert");
+            Assert.Contains("auth=\"auth@example.com\"", record);
+        }
+        else
+        {
+            Assert.False(File.Exists(logfile));
+            Assert.False(File.Exists(Path.Combine(fixture.DataDirectory, "log.txt")));
+        }
+    }
+
+    // Records held mail as ERROR while stderr remains active and both original message files stay inert.
+    [StandaloneFact]
+    public async Task StandaloneSorterLogsHeldErrorWithoutVerboseOutput()
+    {
+        using var fixture = new ProcessorFixture();
+        string binaryDirectory = CopyExecutables(fixture, "sm-sorter");
+        string logfile = Path.Combine(fixture.Root, "sorter trace.txt");
+        var originals = fixture.WriteMessage("held", ProcessorFixture.Header(auth: ""));
+        MoveToSorter(fixture, "held");
+
+        var result = await RunAsync(binaryDirectory, "sm-sorter", fixture,
+            [fixture.DataDirectory, "-l", logfile, fixture.SpoolDirectory, "held"]);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Empty(result.Output);
+        Assert.Contains("held", result.Error, StringComparison.OrdinalIgnoreCase);
+        AssertSorterLogRecord(Assert.Single(File.ReadAllLines(logfile)), "ERROR", "held");
+        string queue = Path.Combine(fixture.SpoolDirectory, "proc");
+        Assert.Equal(originals.Hdr, File.ReadAllBytes(Path.Combine(queue, "held.hdr.sort")));
+        Assert.Equal(originals.Eml, File.ReadAllBytes(Path.Combine(queue, "held.eml")));
+        Assert.True(File.Exists(Path.Combine(queue, "held.sort.err")));
+        Assert.False(File.Exists(Path.Combine(queue, "held.hdr")));
+        Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory));
+        Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
+    }
+
+    // A real logfile-open failure reports to stderr but cannot prevent the same message from passing.
+    [StandaloneFact]
+    public async Task StandaloneSorterLogOpenFailureDoesNotHoldMail()
+    {
+        using var fixture = new ProcessorFixture();
+        string binaryDirectory = CopyExecutables(fixture, "sm-sorter");
+        string logfile = Path.Combine(fixture.Root, "unwritable sorter log.txt");
+        Directory.CreateDirectory(logfile);
+        var originals = fixture.WriteMessage("pass-after-log-error", ProcessorFixture.Header(auth: "not-enrolled@example.com"));
+        MoveToSorter(fixture, "pass-after-log-error");
+
+        var result = await RunAsync(binaryDirectory, "sm-sorter", fixture,
+            [fixture.DataDirectory, "-l", logfile, fixture.SpoolDirectory, "pass-after-log-error"]);
+
+        Assert.True(result.ExitCode == 0, result.Error);
+        Assert.Empty(result.Output);
+        Assert.Contains("ERROR logging to", result.Error);
+        Assert.Equal(originals.Hdr, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "pass-after-log-error.hdr")));
+        Assert.Equal(originals.Eml, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "pass-after-log-error.eml")));
+        Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory));
+        Assert.Empty(Directory.GetFiles(Path.Combine(fixture.SpoolDirectory, "proc"), "*.sort.err"));
+        Assert.True(Directory.Exists(logfile));
     }
 
     // Exercises relocated EXEs through byte-preserving diversion, real rewriting, and two-recipient fan-out.
@@ -177,6 +305,14 @@ public sealed class StandaloneExecutableTests
         Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "valid-1.hdr")));
         Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "valid-1.eml")));
         Assert.False(File.Exists(Path.Combine(fixture.ProcessDirectory, "valid.err")));
+    }
+
+    // Checks the terminal result and quoted message identity without depending on timestamps or explanatory wording.
+    private static void AssertSorterLogRecord(string record, string result, string basename)
+    {
+        Assert.Contains("result=" + result, record);
+        Assert.Contains("basename=\"" + basename + "\"", record);
+        Assert.Contains("reason=\"", record);
     }
 
     // Copies only requested EXEs into a fresh isolated directory, leaving all publish-folder sidecars behind.

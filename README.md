@@ -50,14 +50,16 @@ Private actual-server messages in an optional local `samples/` folder stay outsi
 ## Invocation
 
 ```text
-sm-sorter.exe <datadir> <spooldir> [<basename>]
+sm-sorter.exe <datadir> [-l <logfile>] [-v] <spooldir> [<basename>]
 sm-tagger.exe <datadir> [-log] [-keep] <spooldir> [<basename>]
 ```
 
-Omit the basename for watch mode. Supplying it processes only that plain message pair and exits. Tagger options must appear immediately after `datadir`.
+Omit the basename for watch mode. Supplying it processes only that plain message pair and exits. Each program's options must appear immediately after `datadir`, before `spooldir`; the sorter's `-l` and `-v` may appear in either order, at most once each.
 
 Missing, extra, or invalid arguments print usage hints and examples to standard error, then exit with status 1 before opening either queue. Paths containing spaces must be quoted.
 
-Both modes enforce their singleton lock. `-log` requests the best-effort UTF-8 execution trace at `<datadir>\log.txt`; without it the tagger never opens that file. `-keep` retains `.in` and `.out` debugging copies in `<datadir>\process`.
+For the sorter, `-l <logfile>` appends one best-effort UTF-8 result line per attempted message: `PASS`, `DIVERT`, or `ERROR`, with UTC time, basename, auth when known, reason, and file locations. Relative log paths resolve from the working directory; create the parent directory first. `-v` writes lifecycle, scans, routing decisions, and file-operation debugging to standard output. These options are independent; errors still go to standard error without either option. A stale watcher entry that disappears before ownership gets no email-log record.
+
+Both modes enforce their singleton lock. For the tagger, `-log` requests the best-effort UTF-8 execution trace at `<datadir>\log.txt`; without it the tagger never opens that file. `-keep` retains `.in` and `.out` debugging copies in `<datadir>\process`.
 
 Logging failures print to standard error and mail processing continues, including the current message. Corrupted or missing logs are acceptable. An activated message with the wrong number of `From:` fields or mailboxes is a real contract error: retain its original pair as `.hdr.err` and `.eml.err`, attempt the parent `.err` diagnostic and requested trace, and print the error to standard error. Out-of-band delivery of standard-error messages is deferred to FUT-005.

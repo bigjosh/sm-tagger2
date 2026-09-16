@@ -21,18 +21,24 @@ public sealed record Invocation(
     string SpoolDirectory,
     string? Basename,
     bool Log = false,
-    bool Keep = false)
+    bool Keep = false,
+    string? SorterLogPath = null,
+    bool Verbose = false)
 {
     public const string SorterUsage = """
-        Usage: sm-sorter.exe <datadir> <spooldir> [<basename>]
+        Usage: sm-sorter.exe <datadir> [-l <logfile>] [-v] <spooldir> [<basename>]
 
           <datadir>   Data root containing the senders directory.
           <spooldir>  SmarterMail spool root, not its proc subdirectory.
           <basename> Optional message filename without .hdr or .eml; process that pair and exit.
                      Omit it to watch <spooldir>\proc continuously.
+          -l <logfile> Append one best-effort result line per message to this file.
+          -v         Print verbose routing and file-operation diagnostics to stdout.
+                     Put options immediately after <datadir>, before <spooldir>.
+                     Use a dedicated log file outside mail queues and configuration records.
 
         Examples (PowerShell; quote paths containing spaces):
-          .\sm-sorter.exe "D:\Tagger Data" "D:\SmarterMail\Spool"
+          .\sm-sorter.exe "D:\Tagger Data" -l "D:\Logs\sorter.log" -v "D:\SmarterMail\Spool"
           .\sm-sorter.exe "D:\Tagger Data" "D:\SmarterMail\Spool" message123
         """;
 
@@ -54,15 +60,43 @@ public sealed record Invocation(
 
     public bool IsWatchMode => Basename is null;
 
-    // Parse the sorter's positional arguments without interpreting basename hyphens as options.
+    // Recognize sorter diagnostics options before spooldir while preserving literal basename hyphens.
     public static Invocation ParseSorter(string[] arguments)
     {
-        if (arguments.Length is not (2 or 3))
+        if (arguments.Length < 2)
         {
-            throw new ArgumentException("Expected datadir and spooldir, with an optional basename (2 or 3 arguments).");
+            throw new ArgumentException("Expected at least datadir and spooldir.");
         }
 
-        return Create(arguments[0], arguments[1], arguments.Length == 3 ? arguments[2] : null, false, false);
+        string? logPath = null;
+        bool verbose = false;
+        int index = 1;
+        while (index < arguments.Length && arguments[index] is "-l" or "-v")
+        {
+            if (arguments[index] == "-l")
+            {
+                if (logPath is not null)
+                    throw new ArgumentException("The -l option may be supplied only once.");
+                if (++index == arguments.Length || arguments[index] is "-l" or "-v")
+                    throw new ArgumentException("The -l option requires a logfile path.");
+                logPath = arguments[index];
+                ArgumentException.ThrowIfNullOrWhiteSpace(logPath);
+            }
+            else
+            {
+                if (verbose)
+                    throw new ArgumentException("The -v option may be supplied only once.");
+                verbose = true;
+            }
+
+            index++;
+        }
+
+        if (arguments.Length - index is not (1 or 2))
+            throw new ArgumentException("Expected spooldir and an optional basename after datadir and any -l/-v options.");
+
+        return Create(arguments[0], arguments[index], arguments.Length - index == 2 ? arguments[index + 1] : null,
+            false, false, logPath, verbose);
     }
 
     // Recognize tagger flags only between the datadir and spooldir positional arguments.
@@ -109,7 +143,8 @@ public sealed record Invocation(
     }
 
     // Validate invocation boundaries before any queue or singleton file is touched.
-    private static Invocation Create(string dataDirectory, string spoolDirectory, string? basename, bool log, bool keep)
+    private static Invocation Create(string dataDirectory, string spoolDirectory, string? basename, bool log, bool keep,
+        string? sorterLogPath = null, bool verbose = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dataDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(spoolDirectory);
@@ -118,6 +153,7 @@ public sealed record Invocation(
             throw new ArgumentException("The basename must be one usable literal Windows filename component.", nameof(basename));
         }
 
-        return new Invocation(Path.GetFullPath(dataDirectory), Path.GetFullPath(spoolDirectory), basename, log, keep);
+        return new Invocation(Path.GetFullPath(dataDirectory), Path.GetFullPath(spoolDirectory), basename, log, keep,
+            sorterLogPath is null ? null : Path.GetFullPath(sorterLogPath), verbose);
     }
 }

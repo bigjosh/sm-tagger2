@@ -26,7 +26,7 @@ For application-folder ZIPs, deploy each complete folder and change `$sorter` to
 | Runtime hosting | The tested .NET 10.0.11 standalone builds ran without extracting runtime files. Verify the selected release under the intended process identity; if its runtime requires extraction, provide writable, account-protected storage as described in [release files](deployment.md#release-files). This is separate from the mail data layout. |
 | `$spool\`, `$spool\proc\` | Identify and prepare the actual SmarterMail queue. Neither executable creates these directories. Both must exist before the sorter starts. |
 | `$data\` | Operator selects a fresh data root for this bring-up. It and all queue, mapping, and staging paths must share the spool's ordinary local NTFS volume. |
-| `$evidence\` | Operator creates a protected location for captures and stderr; this is outside the runtime data layout. |
+| `$evidence\` | Operator creates a protected location for captures, the optional sorter email log, and stderr; this is outside the runtime data layout. |
 
 Check the intended process identities can enumerate/read their inputs, create locks and working files, and perform non-replacing moves and cleanup on the selected roots. Protect mail, mappings, and diagnostics; diagnostics can contain private identities. Verify actual volume topology and permissions, including any mounted paths, under `LAB-004`.
 
@@ -63,12 +63,14 @@ With no sorter watcher running, enable the selected SmarterMail `proc` route dur
 
 ```powershell
 $basename = 'replace-with-observed-basename'
-& $sorter $data $spool $basename 2> (Join-Path $evidence 'sorter-one-shot.stderr.txt')
+& $sorter $data -l (Join-Path $evidence 'sorter-mail.log') -v $spool $basename 2> (Join-Path $evidence 'sorter-one-shot.stderr.txt')
 $sorterExit = $LASTEXITCODE
 $sorterExit
 ```
 
-There are no additional directory requirements. A successful one-shot returns `0`; the pair leaves `proc` and is published EML-first/HDR-last into `$spool`, where SmarterMail may consume it immediately. Use controlled queue observation to compare the unchanged pair bytes, and confirm delivery at the independent test receiver. Repeat for authenticated non-enrolled and no-auth paths. Establish readiness and route coverage under `LAB-001` and `LAB-002`.
+There are no additional directory requirements: stage 1 already created the email log's parent directory. `-l` appends a terminal `PASS`, `DIVERT`, or `ERROR` line for the message to `sorter-mail.log`; `-v` shows debugging on the console's standard output. They are optional and can be used independently. Without `-l`, the sorter opens no email log; without `-v`, it omits debug output. Errors still go to stderr. The sorter does not create a missing log parent directory.
+
+A successful one-shot returns `0`; the pair leaves `proc` and is published EML-first/HDR-last into `$spool`, where SmarterMail may consume it immediately. Use controlled queue observation to compare the unchanged pair bytes, and confirm delivery at the independent test receiver. Repeat for authenticated non-enrolled and no-auth paths. Establish readiness and route coverage under `LAB-001` and `LAB-002`. The email-log result describes the sorter's operation, not final delivery.
 
 If it fails, inspect stderr, `proc\<basename>.hdr.sort`, any `<basename>.sort.err`, and the EML's actual location. A publication failure can move the EML before the HDR fails. One-shot mode processes a plain pair only; it never resumes retained files.
 
@@ -77,15 +79,15 @@ If it fails, inspect stderr, `proc\<basename>.hdr.sort`, any `<basename>.sort.er
 Keep `senders` empty and the tagger stopped. In its own console, using the stage 0 variables:
 
 ```powershell
-& $sorter $data $spool 2> (Join-Path $evidence 'sorter-watch.stderr.txt')
+& $sorter $data -l (Join-Path $evidence 'sorter-mail.log') -v $spool 2> (Join-Path $evidence 'sorter-watch.stderr.txt')
 $LASTEXITCODE
 ```
 
 The same folders suffice. The sorter creates/opens `proc\sm-sorter.lock`; do not create or delete lock files manually. Ownership comes from the open handle, so a lock filename can remain after a clean exit.
 
-Submit fresh controlled messages while the watcher is running and verify delivery. Also verify plain backlog discovery at startup, independent console shutdown/restart, and correct behavior under the intended process host (`LAB-013`). Neither program is a native Windows service. A scheduler or wrapper must preserve arguments, capture stderr and exit status, and provide the tested Ctrl+C/Ctrl+Break shutdown behavior.
+Submit fresh controlled messages while the watcher is running and verify delivery. Also verify plain backlog discovery at startup, independent console shutdown/restart, and correct behavior under the intended process host (`LAB-013`). Neither program is a native Windows service. A scheduler or wrapper must preserve arguments, capture stderr and exit status, capture stdout when using `-v`, and provide the tested Ctrl+C/Ctrl+Break shutdown behavior. Use an absolute `-l` path in a job so its working directory cannot change the log location.
 
-Check fresh arrivals leave `proc`, retained suffixes and stderr are reviewed, and the receiver gets the expected mail. A running process alone does not prove successful processing: message-local failures leave inert files while the watcher continues. Watchers reconsider a completed plain HDR within 30 seconds while otherwise idle. A stopped sorter stops all mail through this `proc`.
+Check fresh arrivals leave `proc`, retained suffixes and stderr are reviewed, and the receiver gets the expected mail. The optional email log contains message results only; startup, shutdown, scans, and stale watcher entries appear only in `-v` debugging. An email-log failure reports to stderr and disables that file for the invocation while mail processing continues. A running process alone does not prove successful processing: message-local failures leave inert files while the watcher continues. Watchers reconsider a completed plain HDR within 30 seconds while otherwise idle. A stopped sorter stops all mail through this `proc`.
 
 ## 4. Start the tagger with no enrolled senders
 

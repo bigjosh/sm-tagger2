@@ -5,6 +5,7 @@
     <RootNamespace>SmSorter</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="SmTagger.Tests" />
     <ProjectReference Include="../SmTagger.Shared/SmTagger.Shared.csproj" />
   </ItemGroup>
 </Project>
