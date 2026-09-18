@@ -160,25 +160,28 @@ public sealed class TaggerProcessorTests
         Assert.Empty(harness.Tags.Mappings);
     }
 
-    // Rejects retired identity matches before no-match pass-through regardless of the matching field.
+    // A former private address remains ordinary data even when another identity activates tagging.
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void RetiredPrivateAddressFailsClosed(bool hdrMatch)
+    public void FormerPrivateAddressDoesNotBlockCurrentPrivateTagging(bool hdrMatch)
     {
         using var fixture = new ProcessorFixture();
-        fixture.WriteProfile("retired-private-addresses.txt", "retired@example.com\r\n");
-        fixture.WriteMessage("mail", ProcessorFixture.Header(sender: hdrMatch ? "retired@example.com" : "other@example.org"),
-            ProcessorFixture.Message("From: other@example.org\r\n", hdrMatch ? "" : "Sender: retired@example.com\r\n")
-                .Replace("<private@example.com>", "<>"));
+        fixture.WriteProfile("retired-private-addresses.txt", "former@example.com\r\n");
+        fixture.WriteMessage("mail", ProcessorFixture.Header(sender: hdrMatch ? "former@example.com" : "other@example.org"),
+            ProcessorFixture.Message(extra: hdrMatch ? "" : "Sender: former@example.com\r\n"));
         using var harness = fixture.Open();
-        Assert.Equal(MessageOutcome.Failed, harness.Processor.Process("mail"));
-        Assert.Contains("retired", File.ReadAllText(Path.Combine(fixture.ProcessDirectory, "mail.err")));
-        Assert.Empty(harness.Tags.Mappings);
-        Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
+        Assert.Equal(MessageOutcome.Succeeded, harness.Processor.Process("mail"));
+        string tag = Assert.Single(harness.Tags.Mappings).Value.TagAddress;
+        string eml = File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "mail-1.eml"));
+        Assert.Contains($"From: \"Fixture Sender\" <{tag}>\r\n", eml);
+        Assert.Contains("former@example.com", hdrMatch
+            ? File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "mail-1.hdr")) : eml);
+        Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory));
+        Assert.Empty(fixture.Errors.ToString());
     }
 
-    // Isolates every supported sender location as the sole current or retired private identity.
+    // Only the current private identity activates edits; a former value passes unchanged in every supported location.
     [Theory]
     [InlineData("HDR line 2", false)]
     [InlineData("HDR line 2", true)]
@@ -202,14 +205,14 @@ public sealed class TaggerProcessorTests
     [InlineData("Return-Receipt-To", true)]
     [InlineData("X-Confirm-Reading-To", false)]
     [InlineData("X-Confirm-Reading-To", true)]
-    public void EachSupportedSenderLocationActivatesOrRejectsRetiredIdentity(string location, bool retired)
+    public void EachSupportedSenderLocationTagsCurrentOrPassesFormerIdentity(string location, bool former)
     {
         using var fixture = new ProcessorFixture();
-        fixture.WriteProfile("retired-private-addresses.txt", "retired@example.com\r\n");
-        string identity = retired ? "RETIRED@EXAMPLE.COM" : "PRIVATE@EXAMPLE.COM";
+        fixture.WriteProfile("retired-private-addresses.txt", "former@example.com\r\n");
+        string identity = former ? "FORMER@EXAMPLE.COM" : "PRIVATE@EXAMPLE.COM";
         string envelope = location == "HDR line 2" ? identity : "<>";
         string metadataSender = location == "HDR from" ? identity : "";
-        string recipient = retired ? "unparsed recipients" : "alice@example.net";
+        string recipient = former ? "unparsed recipients" : "alice@example.net";
         string hdr = $"Written \r\n{envelope}\r\n{recipient}\r\nauth: {ProcessorFixture.Auth}\r\nfRoM:\t{metadataSender} \r\n\r\n";
         string fromAddress = location == "From" ? identity : "other@example.org";
         string identityField = location switch
@@ -223,15 +226,15 @@ public sealed class TaggerProcessorTests
         var originals = fixture.WriteMessage("mail", hdr, eml);
         using var harness = fixture.Open();
 
-        if (retired)
+        if (former)
         {
-            Assert.Equal(MessageOutcome.Failed, harness.Processor.Process("mail"));
-            Assert.Contains("retired", File.ReadAllText(Path.Combine(fixture.ProcessDirectory, "mail.err")));
-            Assert.Equal(originals.Hdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "mail.hdr.start")));
-            Assert.Equal(originals.Eml, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "mail.eml.start")));
+            Assert.Equal(MessageOutcome.Succeeded, harness.Processor.Process("mail"));
+            Assert.Equal(originals.Hdr, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "mail.hdr")));
+            Assert.Equal(originals.Eml, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "mail.eml")));
             Assert.Empty(harness.Tags.Mappings);
             Assert.False(Directory.Exists(Path.Combine(fixture.DataDirectory, "tag-addresses")));
-            Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
+            Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory));
+            Assert.Empty(fixture.Errors.ToString());
         }
         else
         {

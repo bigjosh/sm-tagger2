@@ -12,4 +12,4 @@
 examples/datadir/** -text
 lab/SmTagger.LabDkim/Fixtures/rfc8463-key.txt -text whitespace=cr-at-eol
 # The HDR example intentionally includes the literal trailing space in "Written ".
-spec.md whitespace=-blank-at-eol
+storage-reference.md whitespace=-blank-at-eol

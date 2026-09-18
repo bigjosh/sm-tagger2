@@ -21,10 +21,10 @@ public sealed class TaggerProcessor
     internal Func<string, Stream>? OpenChildFileForTesting { get; set; }
 
     // Binds the validated startup snapshot and permanent mapping authority to one queue.
-    public TaggerProcessor(string dataDirectory, string spoolDirectory, SenderConfiguration configuration,
+    public TaggerProcessor(string spoolDirectory, SenderConfiguration configuration,
         TagStore tags, TraceLog trace, bool keep = false)
     {
-        processDirectory = Path.Combine(dataDirectory, "process");
+        processDirectory = MailQueuePaths.ProcessDirectory(spoolDirectory);
         this.spoolDirectory = spoolDirectory;
         this.configuration = configuration;
         this.tags = tags;
@@ -92,15 +92,9 @@ public sealed class TaggerProcessor
 
             state.SetOperation("classify-private-identities", state.EmlPath, null);
             var senderAddresses = hdr.SenderAddresses.Concat(eml.SenderAddresses).ToArray();
-            var retiredMatch = senderAddresses.FirstOrDefault(address => profile.RetiredPrivateAddresses.Contains(address));
-            if (retiredMatch is not null)
-            {
-                throw new MailContractException($"A supported sender field contains retired private-address {retiredMatch}.");
-            }
-
             if (!senderAddresses.Contains(profile.PrivateAddress))
             {
-                trace.Event(basename, "TRIGGER", "PASS", ("reason", "No current or retired private sender identity"));
+                trace.Event(basename, "TRIGGER", "PASS", ("reason", "No configured private sender identity"));
                 PassUnchanged(state);
                 return MessageOutcome.Succeeded;
             }

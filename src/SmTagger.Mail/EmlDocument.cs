@@ -11,15 +11,20 @@ public sealed class EmlDocument
         "Disposition-Notification-To", "Return-Receipt-To", "X-Confirm-Reading-To"
     };
     private readonly byte[] source;
+    private readonly int preambleLength;
+    private readonly MailField? firstOutputField;
     public IReadOnlyList<MailField> Fields { get; }
     public IReadOnlyList<MailField> FromFields { get; }
     public IReadOnlyList<MailField> ReplyToFields { get; }
     public IReadOnlyList<string> SenderAddresses { get; }
 
     // Keeps the parsed original immutable while exposing the counts needed for activation policy.
-    private EmlDocument(byte[] source, IReadOnlyList<MailField> fields)
+    private EmlDocument(byte[] source, IReadOnlyList<MailField> fields, int preambleLength)
     {
         this.source = source;
+        this.preambleLength = preambleLength;
+        firstOutputField = preambleLength == 0 ? null : fields.FirstOrDefault(field =>
+            !field.Name.Equals("Return-Path", StringComparison.OrdinalIgnoreCase));
         Fields = fields;
         FromFields = Array.AsReadOnly(fields.Where(field => field.Name.Equals("From", StringComparison.OrdinalIgnoreCase)).ToArray());
         ReplyToFields = Array.AsReadOnly(fields.Where(field => field.Name.Equals("Reply-To", StringComparison.OrdinalIgnoreCase)).ToArray());
@@ -31,7 +36,14 @@ public sealed class EmlDocument
     {
         int boundary = source.AsSpan().IndexOf("\r\n\r\n"u8);
         if (boundary < 0) throw new MailContractException("EML is missing its CRLF header/body boundary.");
-        IReadOnlyList<PhysicalLine> lines = boundary == 0 ? Array.Empty<PhysicalLine>() : PhysicalLines.Scan(source.AsSpan(0, boundary + 2));
+        // SM build 9742's immediate API emits EF BB BF before its first EML field. Accept exactly
+        // one at byte zero, preserving it as a preamble; all field/edit positions stay absolute.
+        // Recheck producer and signed wire output after SM updates: bom-compatibility-2026-09-16.md.
+        int preambleLength = source.AsSpan().StartsWith("\uFEFF"u8) ? 3 : 0;
+        IReadOnlyList<PhysicalLine> lines = boundary == preambleLength ? Array.Empty<PhysicalLine>()
+            : PhysicalLines.Scan(source.AsSpan(preambleLength, boundary + 2 - preambleLength));
+        if (preambleLength != 0)
+            lines = lines.Select(line => line with { Start = line.Start + preambleLength }).ToArray();
         string header = Encoding.Latin1.GetString(source, 0, boundary + 2);
         var fields = new List<MailField>();
         int index = 0;
@@ -59,7 +71,7 @@ public sealed class EmlDocument
             fields.Add(new MailField(name, line.Start, fieldEnd - line.Start, valueStart, valueLength, addresses,
                 Array.AsReadOnly(lines.Skip(first).Take(index - first).ToArray())));
         }
-        return new EmlDocument(source, fields.AsReadOnly());
+        return new EmlDocument(source, fields.AsReadOnly(), preambleLength);
     }
 
     // Separates optional MDN classification from ordinary field parsing so an enabled profile can skip it.
@@ -110,10 +122,13 @@ public sealed class EmlDocument
     // Counts changed physical lines from parsed boundaries; synthetic fields check every output line.
     private void CheckLineLengths(MailField field, IReadOnlyList<ByteEdit> replacements, bool synthesized)
     {
+        // Stripping leading Return-Path fields leaves the preamble before the first surviving
+        // original field. A synthesized Reply-To copies only From's field bytes, never the BOM.
+        bool carriesPreamble = !synthesized && ReferenceEquals(field, firstOutputField);
         for (int i = 0; i < field.Lines.Count; i++)
         {
             PhysicalLine line = field.Lines[i];
-            int length = line.Length;
+            int length = checked(line.Length + (carriesPreamble && i == 0 ? preambleLength : 0));
             bool changed = synthesized;
             foreach (ByteEdit replacement in replacements)
             {

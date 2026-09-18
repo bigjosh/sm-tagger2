@@ -29,7 +29,7 @@ public sealed record Invocation(
     public const string SorterUsage = """
         Usage: sm-sorter.exe <datadir> [-l <logfile>] [-v] <spooldir> [<basename>]
 
-          <datadir>   Data root containing the senders directory.
+          <datadir>   Data root containing senders\auth-addresses (may be empty).
           <spooldir>  SmarterMail spool root, not its proc subdirectory.
           <basename> Optional message filename without .hdr or .eml; process that pair and exit.
                      Omit it to watch <spooldir>\proc continuously.
@@ -46,12 +46,12 @@ public sealed record Invocation(
     public const string TaggerUsage = """
         Usage: sm-tagger.exe <datadir> [-log] [-keep] <spooldir> [<basename>]
 
-          <datadir>   Data root containing senders, profiles, and the process queue.
+          <datadir>   Data root containing sender configuration and permanent tag mappings.
           <spooldir>  SmarterMail spool root where completed messages are returned.
           <basename> Optional message filename without .hdr or .eml; process that pair and exit.
-                     Omit it to watch <datadir>\process continuously.
+                     Omit it to watch <spooldir>\proc\sm-tagger\process continuously.
           -log       Write the best-effort execution trace to <datadir>\log.txt.
-          -keep      Retain original and output copies in <datadir>\process.
+          -keep      Retain original and output copies in <spooldir>\proc\sm-tagger\process.
                      Put these options immediately after <datadir>, before <spooldir>.
 
         Examples (PowerShell; quote paths containing spaces):

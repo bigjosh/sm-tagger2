@@ -18,6 +18,8 @@ public static class Program
             string phase = args[3];
             string signalPath = args[4];
             using var singleton = SingletonLock.Acquire(Path.Combine(dataDirectory, "sm-tagger.lock"));
+            Directory.CreateDirectory(MailQueuePaths.WorkDirectory(spoolDirectory));
+            using var queueSingleton = SingletonLock.Acquire(MailQueuePaths.TaggerLockPath(spoolDirectory));
             using var trace = TraceLog.Open(dataDirectory, false);
             SenderConfiguration configuration = SenderConfiguration.Load(dataDirectory, trace);
             byte proposal = 0;
@@ -27,7 +29,7 @@ public static class Program
                 Array.Fill(bytes, ++proposal);
             });
             tags.BeforeCacheInsert = _ => PauseIfSelected("MAPPING_PUBLISHED", phase, signalPath);
-            var processor = new TaggerProcessor(dataDirectory, spoolDirectory, configuration, tags, trace)
+            var processor = new TaggerProcessor(spoolDirectory, configuration, tags, trace)
             {
                 ObserveCheckpoint = checkpoint => PauseIfSelected(checkpoint.Phase, phase, signalPath)
             };

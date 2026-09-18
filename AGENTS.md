@@ -1,6 +1,6 @@
 # Implementation working rules
 
-Read `spec.md` as the behavioral authority, `implementation.md` as the implementation guide, and `testing-plan.md` for verification. `assumptions.md` separates local verification from deployment evidence; `future.md` remains out of scope.
+Read `spec.md` as the behavioral authority and `storage-reference.md` as its normative directory/file-format reference, `implementation.md` as the implementation guide, and `testing-plan.md` for verification. `assumptions.md` separates local verification from deployment evidence; `future.md` remains out of scope.
 
 Use pure managed C# targeting `net10.0`. Preserve message bytes outside the specified edits. Keep the sorter independent of tagger-only parsing, configuration, mapping, and logging code. Add a short responsibility comment before every method. Test real failure and retention boundaries without adding runtime-selectable fault controls or automatic recovery. Narrow internal test seams may exercise otherwise unreachable failures; production CLI, environment, configuration, and message data must never select them.
 

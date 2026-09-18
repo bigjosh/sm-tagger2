@@ -4,13 +4,10 @@ using SmTagger.Shared;
 
 namespace SmTagger.Engine;
 
-/// <summary>The immutable sending identity selected by a current authenticated address.</summary>
+/// <summary>The immutable sending identity selected by one or more authentication indexes.</summary>
 public sealed record SenderProfile(
     string SenderId,
-    string AuthAddress,
-    IReadOnlyList<string> RetiredAuthAddresses,
     string PrivateAddress,
-    IReadOnlyList<string> RetiredPrivateAddresses,
     string Template,
     bool AllowMdn);
 
@@ -26,73 +23,50 @@ public sealed class StartupConfigurationException : Exception
 public sealed class SenderConfiguration
 {
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
-    private readonly IReadOnlyDictionary<string, SenderProfile> currentAuth;
-    private readonly HashSet<string> retiredAuth;
+    private readonly IReadOnlyDictionary<string, SenderProfile> authIndexes;
 
     public IReadOnlyDictionary<string, SenderProfile> Profiles { get; }
 
     // Freeze the dictionaries after the configuration relationships have been validated.
     private SenderConfiguration(Dictionary<string, SenderProfile> profiles,
-        Dictionary<string, SenderProfile> currentAuth, HashSet<string> retiredAuth)
+        Dictionary<string, SenderProfile> authIndexes)
     {
         Profiles = new ReadOnlyDictionary<string, SenderProfile>(profiles);
-        this.currentAuth = new ReadOnlyDictionary<string, SenderProfile>(currentAuth);
-        this.retiredAuth = retiredAuth;
+        this.authIndexes = new ReadOnlyDictionary<string, SenderProfile>(authIndexes);
     }
 
-    // Load profiles and prove that all published authentication indexes agree with them.
+    // Load stable sender records and resolve every published auth index to its existing sender.
     public static SenderConfiguration Load(string dataDir, TraceLog trace)
     {
         try
         {
-            string profilesRoot = Path.Combine(dataDir, "profiles");
-            string sendersRoot = Path.Combine(dataDir, "senders");
-            string[] profileDirectories = Directory.GetDirectories(profilesRoot);
-            string[] authDirectories = Directory.GetDirectories(sendersRoot);
+            string senderIdsRoot = Path.Combine(dataDir, "senders", "sender-ids");
+            string authAddressesRoot = Path.Combine(dataDir, "senders", "auth-addresses");
+            string[] profileDirectories = Directory.GetDirectories(senderIdsRoot);
+            string[] authDirectories = Directory.GetDirectories(authAddressesRoot);
             Array.Sort(profileDirectories, StringComparer.Ordinal);
             Array.Sort(authDirectories, StringComparer.Ordinal);
             var profiles = new Dictionary<string, SenderProfile>(StringComparer.Ordinal);
-            var currentAuth = new Dictionary<string, SenderProfile>(StringComparer.Ordinal);
-            var retiredAuth = new HashSet<string>(StringComparer.Ordinal);
+            var authIndexes = new Dictionary<string, SenderProfile>(StringComparer.Ordinal);
             var allAddresses = new Dictionary<string, string>(StringComparer.Ordinal);
-            var expectedIndexes = new Dictionary<string, string>(StringComparer.Ordinal);
 
             foreach (string directory in profileDirectories)
             {
                 string senderId = Path.GetFileName(directory);
                 ValidateSenderId(senderId, directory);
-                string auth = ReadAddress(Path.Combine(directory, "auth-address.txt"));
                 string privateAddress = ReadAddress(Path.Combine(directory, "private-address.txt"));
-                IReadOnlyList<string> oldAuth = ReadAddressList(Path.Combine(directory, "retired-auth-addresses.txt"));
-                IReadOnlyList<string> oldPrivate = ReadAddressList(Path.Combine(directory, "retired-private-addresses.txt"));
                 string template = ReadTemplate(Path.Combine(directory, "from-template.txt"));
                 string policy = TrimTerminalNewlines(ReadText(Path.Combine(directory, "allow-mdn.txt")));
                 if (policy is not ("true" or "false"))
                     throw new StartupConfigurationException($"Invalid allow-mdn.txt in {directory}; expected exactly true or false.");
 
-                var profile = new SenderProfile(senderId, auth, oldAuth, privateAddress, oldPrivate, template, policy == "true");
-                AddIdentity(allAddresses, auth, senderId, "current auth");
-                AddIdentity(allAddresses, privateAddress, senderId, "current private");
-                foreach (string address in oldAuth)
-                    AddIdentity(allAddresses, address, senderId, "retired auth");
-                foreach (string address in oldPrivate)
-                    AddIdentity(allAddresses, address, senderId, "retired private");
-                foreach (string address in oldAuth.Prepend(auth))
-                {
-                    if (!WindowsNames.IsUsableComponent(address))
-                        throw new StartupConfigurationException($"Auth address {address} cannot name a literal Windows directory.");
-                    expectedIndexes.Add(address, senderId);
-                }
-
+                var profile = new SenderProfile(senderId, privateAddress, template, policy == "true");
+                AddIdentity(allAddresses, privateAddress, senderId, "private");
                 profiles.Add(senderId, profile);
-                currentAuth.Add(auth, profile);
-                retiredAuth.UnionWith(oldAuth);
-                trace.Event("-", "PROFILE", "OK", ("senderId", senderId), ("auth", auth),
-                    ("privateAddress", privateAddress), ("retiredAuth", oldAuth),
-                    ("retiredPrivate", oldPrivate), ("template", template), ("allowMdn", profile.AllowMdn));
+                trace.Event("-", "PROFILE", "OK", ("senderId", senderId),
+                    ("privateAddress", privateAddress), ("template", template), ("allowMdn", profile.AllowMdn));
             }
 
-            var actualIndexes = new HashSet<string>(StringComparer.Ordinal);
             foreach (string directory in authDirectories)
             {
                 string address = Path.GetFileName(directory);
@@ -105,17 +79,14 @@ public sealed class SenderConfiguration
                 if (canonical != address || !WindowsNames.IsUsableComponent(address))
                     throw new StartupConfigurationException($"Auth index directory is not a canonical usable address: {directory}");
                 string senderId = ReadSenderId(Path.Combine(directory, "sender-id.txt"));
-                if (!expectedIndexes.TryGetValue(address, out string? expected) || expected != senderId)
-                    throw new StartupConfigurationException($"Auth index {directory} does not identify its profile's current or retired auth address.");
-                if (!profiles.ContainsKey(senderId) || !actualIndexes.Add(address))
-                    throw new StartupConfigurationException($"Unresolved or duplicate auth index: {directory}");
+                if (!profiles.TryGetValue(senderId, out SenderProfile? profile))
+                    throw new StartupConfigurationException($"Auth index {directory} refers to missing sender-id {senderId}.");
+                AddIdentity(allAddresses, address, senderId, "auth");
+                authIndexes.Add(address, profile);
                 trace.Event("-", "AUTH_INDEX", "OK", ("auth", address), ("senderId", senderId));
             }
-            foreach (string address in expectedIndexes.Keys)
-                if (!actualIndexes.Contains(address))
-                    throw new StartupConfigurationException($"Missing required auth index: {Path.Combine(sendersRoot, address)}");
 
-            return new SenderConfiguration(profiles, currentAuth, retiredAuth);
+            return new SenderConfiguration(profiles, authIndexes);
         }
         catch (StartupConfigurationException) { throw; }
         catch (Exception exception)
@@ -124,13 +95,12 @@ public sealed class SenderConfiguration
         }
     }
 
-    // Select only a current enrolled auth; queued retired and unknown auth fail closed.
+    // Resolve indexed accounts through the startup snapshot; unknown queued auth fails closed.
     public SenderProfile Resolve(string canonicalAuth)
     {
-        if (currentAuth.TryGetValue(canonicalAuth, out SenderProfile? profile))
+        if (authIndexes.TryGetValue(canonicalAuth, out SenderProfile? profile))
             return profile;
-        string reason = retiredAuth.Contains(canonicalAuth) ? "retired" : "unconfigured";
-        throw new MailContractException($"Authenticated address {canonicalAuth} is {reason} in this invocation's configuration.");
+        throw new MailContractException($"Authenticated address {canonicalAuth} is unconfigured in this invocation's configuration.");
     }
 
     // Parse only the first whitespace-delimited token and validate the invariant token substitution.
@@ -190,13 +160,6 @@ public sealed class SenderConfiguration
 
     // Parse one address file, preserving strict outer-whitespace handling.
     private static string ReadAddress(string path) => AddressSyntax.Canonicalize(TrimTerminalNewlines(ReadText(path)));
-
-    // Parse each nonempty retired-address line and let global identity validation reject duplicates.
-    private static IReadOnlyList<string> ReadAddressList(string path)
-    {
-        string[] values = ReadText(path).Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
-        return Array.AsReadOnly(values.Select(AddressSyntax.Canonicalize).ToArray());
-    }
 
     // Enforce one canonical address across every role and every sender profile.
     private static void AddIdentity(Dictionary<string, string> addresses, string address, string senderId, string role)

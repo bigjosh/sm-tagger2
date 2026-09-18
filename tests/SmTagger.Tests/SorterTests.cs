@@ -23,7 +23,7 @@ public sealed class SorterTests
         Assert.Equal(eml, File.ReadAllBytes(tree.Spool("-message.eml")));
         Assert.False(File.Exists(tree.Input("-message.hdr")));
         Assert.False(File.Exists(tree.Input("-message.hdr.sort")));
-        Assert.False(Directory.Exists(tree.Data("senders")));
+        Assert.False(Directory.Exists(tree.Data("senders/auth-addresses")));
         Assert.False(File.Exists(tree.Data("log.txt")));
     }
 
@@ -33,23 +33,25 @@ public sealed class SorterTests
     {
         using SorterTestDirectory tree = new();
         byte[] hdr = tree.AddMessage("enrolled", "AuTh: Account@Example.com\r\n");
-        Directory.CreateDirectory(tree.Data("senders/account@example.com"));
+        Directory.CreateDirectory(tree.Data("senders/auth-addresses/account@example.com"));
         Assert.Equal(MessageOutcome.Succeeded, tree.Processor.Process("enrolled"));
-        Assert.Equal(hdr, File.ReadAllBytes(tree.Data("process/enrolled.hdr")));
-        Assert.True(File.Exists(tree.Data("process/enrolled.eml")));
+        Assert.Equal(hdr, File.ReadAllBytes(tree.Work("process/enrolled.hdr")));
+        Assert.True(File.Exists(tree.Work("process/enrolled.eml")));
         Assert.False(File.Exists(tree.Spool("enrolled.hdr")));
-        Assert.False(Directory.Exists(tree.Data("profiles")));
+        Assert.False(Directory.Exists(tree.Data("senders/sender-ids")));
     }
 
-    // A definitively absent child beneath an accessible senders root is safe to pass.
+    // An empty auth-address index permits pass-through without the tagger's sender-id root.
     [Fact]
     public void UnenrolledAuthPassesUnderAccessibleRoot()
     {
         using SorterTestDirectory tree = new();
         tree.AddMessage("unrelated", "auth: account@example.com\r\n");
-        Directory.CreateDirectory(tree.Data("senders"));
+        Directory.CreateDirectory(tree.Data("senders/auth-addresses"));
         Assert.Equal(MessageOutcome.Succeeded, tree.Processor.Process("unrelated"));
         Assert.True(File.Exists(tree.Spool("unrelated.hdr")));
+        Assert.False(Directory.Exists(tree.Data("senders/sender-ids")));
+        Assert.False(Directory.Exists(tree.Work("process")));
     }
 
     // A valid email address that cannot be a literal Windows folder must bypass auth lookup.
@@ -59,7 +61,7 @@ public sealed class SorterTests
         using SorterTestDirectory tree = new();
         tree.AddMessage("slash-auth", "auth: account/part@example.com\r\n");
         Assert.Equal(MessageOutcome.Succeeded, tree.Processor.Process("slash-auth"));
-        Assert.False(Directory.Exists(tree.Data("senders")));
+        Assert.False(Directory.Exists(tree.Data("senders/auth-addresses")));
     }
 
     // Missing or non-directory routing roots and entries must hold rather than misclassify absence.
@@ -73,12 +75,13 @@ public sealed class SorterTests
         byte[] hdr = tree.AddMessage("held", "auth: account@example.com\r\n");
         if (arrangement == "file-root")
         {
-            File.WriteAllText(tree.Data("senders"), "not a directory");
+            Directory.CreateDirectory(tree.Data("senders"));
+            File.WriteAllText(tree.Data("senders/auth-addresses"), "not a directory");
         }
         else if (arrangement == "file-entry")
         {
-            Directory.CreateDirectory(tree.Data("senders"));
-            File.WriteAllText(tree.Data("senders/account@example.com"), "not a directory");
+            Directory.CreateDirectory(tree.Data("senders/auth-addresses"));
+            File.WriteAllText(tree.Data("senders/auth-addresses/account@example.com"), "not a directory");
         }
 
         Assert.Equal(MessageOutcome.Failed, tree.Processor.Process("held", watchMode: true));
@@ -251,6 +254,9 @@ internal sealed class SorterTestDirectory : IDisposable
 
     // Resolve a path below this fixture's datadir.
     public string Data(string name) => Path.Combine(Root, "data", name);
+
+    // Resolve one queue or retained artifact beneath the isolated private working root inside Proc.
+    public string Work(string name) => Path.Combine(Root, "spool", "proc", "sm-tagger", name);
 
     // Write separately synthesized example-domain bytes, never private server captures.
     public byte[] AddMessage(string basename, string metadata = "")

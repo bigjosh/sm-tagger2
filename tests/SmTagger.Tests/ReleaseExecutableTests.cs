@@ -79,7 +79,8 @@ public sealed class ReleaseExecutableTests
         using var sorter = Start("sm-sorter", fixture, [fixture.DataDirectory, fixture.SpoolDirectory]);
         using var tagger = Start("sm-tagger", fixture, [fixture.DataDirectory, fixture.SpoolDirectory]);
         await WaitUntilAsync(() => OwnsLock(Path.Combine(fixture.SpoolDirectory, "proc", "sm-sorter.lock")), sorter);
-        await WaitUntilAsync(() => OwnsLock(Path.Combine(fixture.DataDirectory, "sm-tagger.lock")), tagger);
+        await WaitUntilAsync(() => OwnsLock(Path.Combine(fixture.DataDirectory, "sm-tagger.lock"))
+            && OwnsLock(Path.Combine(fixture.WorkDirectory, "sm-tagger.lock")), tagger);
         fixture.WriteMessage("queued");
         var secondSorter = await RunAsync("sm-sorter", fixture, [fixture.DataDirectory, fixture.SpoolDirectory, "missing"]);
         var secondTagger = await RunAsync("sm-tagger", fixture, [fixture.DataDirectory, fixture.SpoolDirectory, "missing"]);
@@ -240,6 +241,7 @@ public sealed class ReleaseExecutableTests
         using var fixture = new ProcessorFixture();
         string input = Path.Combine(fixture.SpoolDirectory, "proc");
         string logfile = Path.Combine(fixture.Root, "sorter-upstream-failure.log");
+        string holding = fixture.FailedDirectory;
         var failed = fixture.WriteMessage("a-upstream-failed",
             ProcessorFixture.Header(auth: "not-enrolled@example.com").Replace("Written \r\n", "Failed \r\n"));
         MoveToSorter(fixture, "a-upstream-failed");
@@ -250,10 +252,12 @@ public sealed class ReleaseExecutableTests
         await WaitUntilAsync(() => File.Exists(logfile) && ReadSharedText(logfile)
             .Contains("basename=\"b-after-failed\" result=PASS", StringComparison.Ordinal), sorter);
 
-        Assert.Equal(failed.Hdr, File.ReadAllBytes(Path.Combine(input, "a-upstream-failed.hdr.sort")));
-        Assert.Equal(failed.Eml, File.ReadAllBytes(Path.Combine(input, "a-upstream-failed.eml")));
-        Assert.True(File.Exists(Path.Combine(input, "a-upstream-failed.sort.err")));
+        Assert.Equal(failed.Hdr, File.ReadAllBytes(Path.Combine(holding, "a-upstream-failed.hdr.sort")));
+        Assert.Equal(failed.Eml, File.ReadAllBytes(Path.Combine(holding, "a-upstream-failed.eml")));
+        Assert.True(File.Exists(Path.Combine(holding, "a-upstream-failed.sort.err")));
         Assert.False(File.Exists(Path.Combine(input, "a-upstream-failed.hdr")));
+        Assert.False(File.Exists(Path.Combine(input, "a-upstream-failed.hdr.sort")));
+        Assert.False(File.Exists(Path.Combine(input, "a-upstream-failed.eml")));
         Assert.False(File.Exists(Path.Combine(fixture.SpoolDirectory, "a-upstream-failed.hdr")));
         Assert.Equal(passed.Hdr, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "b-after-failed.hdr")));
         Assert.Equal(passed.Eml, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "b-after-failed.eml")));
@@ -267,10 +271,125 @@ public sealed class ReleaseExecutableTests
         Assert.Equal(3, records.Length);
         string errorRecord = Assert.Single(records, line => line.Contains("result=ERROR", StringComparison.Ordinal));
         Assert.Contains("reason=\"UPSTREAM_FAILED\"", errorRecord);
+        Assert.Contains("hdr=" + SmTagger.Shared.ConsoleErrors.Quote(Path.Combine(holding, "a-upstream-failed.hdr.sort")), errorRecord);
+        Assert.Contains("eml=" + SmTagger.Shared.ConsoleErrors.Quote(Path.Combine(holding, "a-upstream-failed.eml")), errorRecord);
         Assert.False(sorter.Process.HasExited);
 
         sorter.Stop();
         Assert.NotEmpty(await sorter.Error.WaitAsync(TimeSpan.FromSeconds(10)));
+
+        string restartedLog = Path.Combine(fixture.Root, "sorter-restarted.log");
+        using FileStream lockedHeldEml = new(Path.Combine(holding, "a-upstream-failed.eml"),
+            FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        using FileStream lockedHeldHdr = new(Path.Combine(holding, "a-upstream-failed.hdr.sort"),
+            FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        using var restarted = Start("sm-sorter", fixture,
+            [fixture.DataDirectory, "-l", restartedLog, "-v", fixture.SpoolDirectory]);
+        await WaitUntilAsync(() => OwnsLock(Path.Combine(input, "sm-sorter.lock")), restarted);
+        fixture.WriteMessage("d-after-restart", ProcessorFixture.Header(auth: "not-enrolled@example.com"));
+        MoveToSorter(fixture, "d-after-restart");
+        await WaitUntilAsync(() => File.Exists(restartedLog) && ReadSharedText(restartedLog)
+            .Contains("basename=\"d-after-restart\" result=PASS", StringComparison.Ordinal)
+            && ReadSharedText(restartedLog).EndsWith("\r\n", StringComparison.Ordinal), restarted);
+        Assert.Single(ReadSharedText(restartedLog).Split("\r\n", StringSplitOptions.RemoveEmptyEntries));
+        restarted.Stop();
+        Assert.Empty(await restarted.Error.WaitAsync(TimeSpan.FromSeconds(10)));
+    }
+
+    // Real one-shot startup returns failure without claiming Writing, unknown, or incomplete-status input.
+    [ReleaseFact]
+    public async Task PublishedSorterOneShotRequiresWrittenStatus()
+    {
+        foreach (var (text, reason, observed) in new[]
+        {
+            ("Writing \t\r\nunfinished routing", "HDR_WRITING", "Writing"),
+            ("Quarantined\r\nunfinished routing", "HDR_STATUS_UNEXPECTED", "Quarantined"),
+            ("Written", "HDR_STATUS_UNEXPECTED", "<missing CRLF>")
+        })
+        {
+            using var fixture = new ProcessorFixture();
+            var original = fixture.WriteMessage("unready", text);
+            MoveToSorter(fixture, "unready");
+            string input = Path.Combine(fixture.SpoolDirectory, "proc");
+            string logfile = Path.Combine(fixture.Root, "written-gate.log");
+
+            var result = await RunAsync("sm-sorter", fixture,
+                [fixture.DataDirectory, "-l", logfile, "-v", fixture.SpoolDirectory, "unready"]);
+
+            Assert.Equal(1, result.ExitCode);
+            Assert.Contains("NOT READY", result.Error);
+            Assert.Contains(reason, result.Error);
+            Assert.Contains(SmTagger.Shared.ConsoleErrors.Quote(observed), result.Error);
+            Assert.Contains("event=DEFER", result.Output);
+            Assert.Empty(File.ReadAllText(logfile));
+            Assert.Equal(original.Hdr, File.ReadAllBytes(Path.Combine(input, "unready.hdr")));
+            Assert.Equal(original.Eml, File.ReadAllBytes(Path.Combine(input, "unready.eml")));
+            Assert.False(File.Exists(Path.Combine(input, "unready.hdr.sort")));
+            Assert.False(File.Exists(Path.Combine(input, "unready.sort.err")));
+            Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory));
+            Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
+            Assert.False(Directory.Exists(fixture.FailedDirectory));
+        }
+    }
+
+    // A nonverbose published watcher reports unknown status, skips unready pairs, and rechecks changed final status.
+    [ReleaseFact]
+    public async Task PublishedSorterWatcherRechecksStatusWithoutClaimingUnreadyPairs()
+    {
+        using var fixture = new ProcessorFixture();
+        string input = Path.Combine(fixture.SpoolDirectory, "proc");
+        string logfile = Path.Combine(fixture.Root, "status-watch.log");
+        var writing = fixture.WriteMessage("a-writing", ProcessorFixture.Header(auth: "not-enrolled@example.com")
+            .Replace("Written \r\n", "Writing \r\n", StringComparison.Ordinal));
+        var unknown = fixture.WriteMessage("b-unknown", "Quarantined\r\nunfinished routing");
+        MoveToSorter(fixture, "a-writing");
+        MoveToSorter(fixture, "b-unknown");
+        fixture.WriteMessage("z-first", ProcessorFixture.Header(auth: "not-enrolled@example.com"));
+        MoveToSorter(fixture, "z-first");
+        using var sorter = Start("sm-sorter", fixture,
+            [fixture.DataDirectory, "-l", logfile, fixture.SpoolDirectory]);
+        await WaitUntilAsync(() => File.Exists(logfile) && ReadSharedText(logfile)
+            .Contains("basename=\"z-first\" result=PASS", StringComparison.Ordinal), sorter);
+        Assert.Equal(writing.Hdr, File.ReadAllBytes(Path.Combine(input, "a-writing.hdr")));
+        Assert.Equal(writing.Eml, File.ReadAllBytes(Path.Combine(input, "a-writing.eml")));
+        Assert.Equal(unknown.Hdr, File.ReadAllBytes(Path.Combine(input, "b-unknown.hdr")));
+        Assert.Equal(unknown.Eml, File.ReadAllBytes(Path.Combine(input, "b-unknown.eml")));
+        Assert.Empty(Directory.GetFiles(input, "*.hdr.sort"));
+        Assert.Empty(Directory.GetFiles(input, "*.sort.err"));
+
+        byte[] written = Encoding.ASCII.GetBytes(ProcessorFixture.Header("changed@example.net"));
+        File.WriteAllBytes(Path.Combine(input, "a-writing.hdr"), written);
+        fixture.WriteMessage("z-second", ProcessorFixture.Header(auth: "not-enrolled@example.com"));
+        MoveToSorter(fixture, "z-second");
+        await WaitUntilAsync(() => ReadSharedText(logfile).Contains("basename=\"a-writing\" result=DIVERT", StringComparison.Ordinal)
+            && ReadSharedText(logfile).Contains("basename=\"z-second\" result=PASS", StringComparison.Ordinal), sorter);
+        Assert.Equal(written, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "a-writing.hdr")));
+        Assert.Equal(writing.Eml, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "a-writing.eml")));
+        Assert.Equal(unknown.Hdr, File.ReadAllBytes(Path.Combine(input, "b-unknown.hdr")));
+
+        byte[] failed = "Failed \r\nmalformed final routing"u8.ToArray();
+        File.WriteAllBytes(Path.Combine(input, "b-unknown.hdr"), failed);
+        fixture.WriteMessage("z-third", ProcessorFixture.Header(auth: "not-enrolled@example.com"));
+        MoveToSorter(fixture, "z-third");
+        await WaitUntilAsync(() => ReadSharedText(logfile).Contains("basename=\"b-unknown\" result=ERROR", StringComparison.Ordinal)
+            && ReadSharedText(logfile).Contains("basename=\"z-third\" result=PASS", StringComparison.Ordinal)
+            && ReadSharedText(logfile).EndsWith("\r\n", StringComparison.Ordinal), sorter);
+        Assert.Equal(failed, File.ReadAllBytes(Path.Combine(fixture.FailedDirectory, "b-unknown.hdr.sort")));
+        Assert.Equal(unknown.Eml, File.ReadAllBytes(Path.Combine(fixture.FailedDirectory, "b-unknown.eml")));
+        Assert.False(File.Exists(Path.Combine(input, "b-unknown.hdr")));
+        Assert.False(File.Exists(Path.Combine(input, "b-unknown.eml")));
+        string[] records = ReadSharedText(logfile).Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(5, records.Length);
+        Assert.Contains("reason=\"UPSTREAM_FAILED\"", Assert.Single(records,
+            line => line.Contains("basename=\"b-unknown\"", StringComparison.Ordinal)));
+
+        sorter.Stop();
+        string error = await sorter.Error.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.True(error.Split("HDR_STATUS_UNEXPECTED", StringSplitOptions.None).Length - 1 >= 2);
+        Assert.Contains("\"Quarantined\"", error);
+        Assert.DoesNotContain("HDR_WRITING", error);
+        string output = await sorter.Output.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Empty(output);
     }
 
     // One-shot readiness failures leave the input live and produce no terminal email-log record.
@@ -329,7 +448,8 @@ public sealed class ReleaseExecutableTests
         }
 
         using var restarted = Start("sm-tagger", fixture, [fixture.DataDirectory, fixture.SpoolDirectory]);
-        await WaitUntilAsync(() => OwnsLock(Path.Combine(fixture.DataDirectory, "sm-tagger.lock")), restarted);
+        await WaitUntilAsync(() => OwnsLock(Path.Combine(fixture.DataDirectory, "sm-tagger.lock"))
+            && OwnsLock(Path.Combine(fixture.WorkDirectory, "sm-tagger.lock")), restarted);
         fixture.WriteMessage("fresh");
         await WaitUntilAsync(() => File.Exists(Path.Combine(fixture.SpoolDirectory, "fresh-1.hdr")), restarted);
         foreach (var file in retained)

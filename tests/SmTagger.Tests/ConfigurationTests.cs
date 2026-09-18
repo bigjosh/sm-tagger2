@@ -11,7 +11,6 @@ public sealed class ConfigurationTests
     public void LoadsCanonicalProfilesAndIgnoresTemplateNotes()
     {
         using var fixture = new StoreTestFixture();
-        fixture.WriteProfile("auth-address.txt", "Auth@Example.COM\r\n");
         fixture.WriteProfile("private-address.txt", "Secret@Example.COM\n");
         fixture.WriteProfile("from-template.txt", " \tSender-%@TAGS.EXAMPLE.COM ignored % invalid\nnotes");
         SenderConfiguration configuration = fixture.LoadConfiguration();
@@ -48,24 +47,21 @@ public sealed class ConfigurationTests
         Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration);
     }
 
-    // Retired routing remains present but cannot select a profile for new processing.
+    // Every index is active, and multiple aliases select the same immutable sender record.
     [Fact]
-    public void RetiredAuthIsLoadedButRejected()
+    public void MultipleAuthIndexesSelectTheSameSender()
     {
         using var fixture = new StoreTestFixture();
         fixture.WriteProfile("retired-auth-addresses.txt", "Old@Example.com\r\n\r\n");
         fixture.WriteIndex("old@example.com");
         SenderConfiguration configuration = fixture.LoadConfiguration();
-        Assert.Contains("retired", Assert.Throws<MailContractException>(() => configuration.Resolve("old@example.com")).Message);
+        Assert.Same(configuration.Resolve("auth@example.com"), configuration.Resolve("old@example.com"));
         Assert.Contains("unconfigured", Assert.Throws<MailContractException>(() => configuration.Resolve("stranger@example.com")).Message);
     }
 
-    // Every profile field is required, including the two possibly empty retired lists.
+    // The sender record requires only its private identity, template, and MDN policy.
     [Theory]
-    [InlineData("auth-address.txt")]
     [InlineData("private-address.txt")]
-    [InlineData("retired-auth-addresses.txt")]
-    [InlineData("retired-private-addresses.txt")]
     [InlineData("from-template.txt")]
     [InlineData("allow-mdn.txt")]
     public void MissingProfileFileFailsStartup(string filename)
@@ -101,16 +97,17 @@ public sealed class ConfigurationTests
         Assert.Equal(expected, fixture.LoadConfiguration().Resolve("auth@example.com").AllowMdn);
     }
 
-    // Canonical identity uniqueness covers current and retired roles, not just auth lookup keys.
+    // An auth index cannot claim the private identity of its own or another sender record.
     [Theory]
-    [InlineData("private-address.txt", "AUTH@EXAMPLE.COM")]
-    [InlineData("retired-private-addresses.txt", "SECRET@EXAMPLE.COM")]
-    [InlineData("retired-auth-addresses.txt", "auth@example.com")]
-    [InlineData("retired-private-addresses.txt", "old@example.com\nOLD@EXAMPLE.COM")]
-    public void DuplicateIdentityRolesFailStartup(string filename, string content)
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AuthAndPrivateIdentityCollisionFailsStartup(bool otherSender)
     {
         using var fixture = new StoreTestFixture();
-        fixture.WriteProfile(filename, content);
+        if (otherSender)
+            fixture.AddProfile(StoreTestFixture.SecondSenderId, "other@example.com", "AUTH@EXAMPLE.COM");
+        else
+            fixture.WriteProfile("private-address.txt", "AUTH@EXAMPLE.COM");
         Assert.Contains("Duplicate identity", Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration).Message);
     }
 
@@ -123,28 +120,50 @@ public sealed class ConfigurationTests
         Assert.Contains("Duplicate identity", Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration).Message);
     }
 
-    // Missing current or retired indexes cannot silently change conservative enrollment routing.
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void MissingExpectedAuthIndexFailsStartup(bool retired)
+    // An indexless sender record still owns its existing permanent mappings without authorizing any auth address.
+    [Fact]
+    public void SenderWithoutAuthIndexesPreservesHistoricalMappings()
     {
         using var fixture = new StoreTestFixture();
-        if (retired)
-            fixture.WriteProfile("retired-auth-addresses.txt", "old@example.com");
-        else
-            Directory.Move(Path.Combine(fixture.Root, "senders", "auth@example.com"), Path.Combine(fixture.Root, "outside-index"));
-        Assert.Contains("Missing required auth index", Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration).Message);
+        Directory.Move(Path.Combine(fixture.Root, "senders", "auth-addresses", "auth@example.com"), Path.Combine(fixture.Root, "outside-index"));
+        string mapping = fixture.WriteMapping("sender-11111@tags.example.com", "person@example.net;");
+        SenderConfiguration configuration = fixture.LoadConfiguration();
+        TagStore store = TagStore.Load(fixture.Root, configuration, fixture.Trace,
+            randomBytes: _ => throw new InvalidOperationException("A historical mapping must be reused."));
+
+        SenderProfile profile = Assert.Single(configuration.Profiles).Value;
+        Assert.Throws<MailContractException>(() => configuration.Resolve("auth@example.com"));
+        Assert.Equal(mapping, store.GetOrCreate(profile, "person@example.net;", "historical").DirectoryPath);
+        Assert.Equal(StoreTestFixture.SenderId, File.ReadAllText(Path.Combine(mapping, "sender-id.txt")));
     }
 
-    // Published indexes cannot introduce an undeclared address or change their stable sender reference.
+    // Every active auth index must resolve to an existing sender-id record.
     [Theory]
-    [InlineData("unknown@example.com", StoreTestFixture.SenderId)]
-    [InlineData("auth@example.com", StoreTestFixture.SecondSenderId)]
-    public void UnexpectedAuthIndexFailsStartup(string address, string senderId)
+    [InlineData("unknown@example.com")]
+    [InlineData("auth@example.com")]
+    public void IndexPointingToMissingSenderFailsStartup(string address)
     {
         using var fixture = new StoreTestFixture();
-        fixture.WriteIndex(address, senderId);
+        fixture.WriteIndex(address, StoreTestFixture.SecondSenderId);
+        Assert.Contains("missing sender-id", Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration).Message);
+    }
+
+    // Authoritative index entries must contain a readable, canonical sender pointer before startup succeeds.
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("malformed")]
+    [InlineData("locked")]
+    public void UnusableAuthPointerFailsStartup(string state)
+    {
+        using var fixture = new StoreTestFixture();
+        string path = Path.Combine(fixture.Root, "senders", "auth-addresses", "auth@example.com", "sender-id.txt");
+        if (state == "missing")
+            File.Delete(path);
+        else if (state == "malformed")
+            File.WriteAllBytes(path, [255, 0, 42]);
+        using FileStream? unavailable = state == "locked"
+            ? new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None) : null;
+
         Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration);
     }
 
@@ -157,13 +176,54 @@ public sealed class ConfigurationTests
         Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration);
     }
 
-    // Literal auth components must be usable by the sorter's directory-only routing lookup.
-    [Fact]
-    public void ValidAddressWithWindowsUnsafeComponentFailsEnrollment()
+    // Directory names themselves establish auth identities and must use canonical supported spelling.
+    [Theory]
+    [InlineData("Auth@Example.com")]
+    [InlineData("not-an-address")]
+    [InlineData("account@-example.com")]
+    public void MalformedOrNoncanonicalAuthDirectoryFailsEnrollment(string directoryName)
     {
         using var fixture = new StoreTestFixture();
-        fixture.WriteProfile("auth-address.txt", "slash/name@example.com");
+        Directory.Move(Path.Combine(fixture.Root, "senders", "auth-addresses", "auth@example.com"),
+            Path.Combine(fixture.Root, "saved-index"));
+        fixture.WriteIndex(directoryName);
         Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration);
+    }
+
+    // Obsolete sender files are unrelated bytes and cannot become hidden configuration dependencies.
+    [Theory]
+    [InlineData("auth-address.txt")]
+    [InlineData("retired-auth-addresses.txt")]
+    [InlineData("retired-private-addresses.txt")]
+    public void ObsoleteSenderFilesAreIgnoredEvenWhenUnreadable(string filename)
+    {
+        using var fixture = new StoreTestFixture();
+        string path = Path.Combine(fixture.ProfileDirectory, filename);
+        byte[] bytes = [255, 0, 42];
+        File.WriteAllBytes(path, bytes);
+        using (FileStream unavailable = new(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            Assert.Equal(StoreTestFixture.SenderId, fixture.LoadConfiguration().Resolve("auth@example.com").SenderId);
+        }
+        Assert.Equal(bytes, File.ReadAllBytes(path));
+    }
+
+    // Index publication and pointer changes affect the next startup snapshot, never an already loaded one.
+    [Fact]
+    public void AuthIndexesAreAnImmutableSnapshotUntilReload()
+    {
+        using var fixture = new StoreTestFixture();
+        fixture.AddProfile(StoreTestFixture.SecondSenderId, "other@example.com", "other-private@example.com");
+        SenderConfiguration original = fixture.LoadConfiguration();
+        fixture.WriteIndex("alias@example.com");
+        fixture.WriteIndex("auth@example.com", StoreTestFixture.SecondSenderId);
+
+        Assert.Throws<MailContractException>(() => original.Resolve("alias@example.com"));
+        Assert.Equal(StoreTestFixture.SenderId, original.Resolve("auth@example.com").SenderId);
+
+        SenderConfiguration restarted = fixture.LoadConfiguration();
+        Assert.Equal(StoreTestFixture.SenderId, restarted.Resolve("alias@example.com").SenderId);
+        Assert.Same(restarted.Resolve("other@example.com"), restarted.Resolve("auth@example.com"));
     }
 
     // Single-value identity reading never conceals leading bytes, BOMs, or internal line breaks.
@@ -210,9 +270,9 @@ public sealed class ConfigurationTests
     public void ExtraFilesAndInertAuthStagingDoNotBecomeConfiguration()
     {
         using var fixture = new StoreTestFixture();
-        File.WriteAllText(Path.Combine(fixture.Root, "profiles", "notes.txt"), "unrelated");
-        File.WriteAllText(Path.Combine(fixture.Root, "senders", "notes.txt"), "unrelated");
-        string staging = Path.Combine(fixture.Root, "senders", ".staging", "broken.authtmp");
+        File.WriteAllText(Path.Combine(fixture.Root, "senders", "sender-ids", "notes.txt"), "unrelated");
+        File.WriteAllText(Path.Combine(fixture.Root, "senders", "auth-addresses", "notes.txt"), "unrelated");
+        string staging = Path.Combine(fixture.Root, "senders", "auth-addresses", ".staging", "broken.authtmp");
         Directory.CreateDirectory(staging);
         File.WriteAllBytes(Path.Combine(staging, "sender-id.txt"), [255]);
         Assert.Single(fixture.LoadConfiguration().Profiles);
@@ -227,15 +287,15 @@ internal sealed class StoreTestFixture : IDisposable
     internal const string SecondSenderId = "b1234567-89ab-4cde-8f01-23456789abcd";
     private static readonly string TestParent = Path.Combine(Path.GetTempPath(), "sm-tagger-store-tests");
     internal string Root { get; } = Path.Combine(TestParent, Guid.NewGuid().ToString("D"));
-    internal string ProfileDirectory => Path.Combine(Root, "profiles", SenderId);
+    internal string ProfileDirectory => Path.Combine(Root, "senders", "sender-ids", SenderId);
     internal StringWriter Errors { get; } = new();
     internal TraceLog Trace { get; }
 
     // Create an isolated synthetic administrative tree; no captured message samples are needed.
     internal StoreTestFixture()
     {
-        Directory.CreateDirectory(Path.Combine(Root, "profiles"));
-        Directory.CreateDirectory(Path.Combine(Root, "senders"));
+        Directory.CreateDirectory(Path.Combine(Root, "senders", "sender-ids"));
+        Directory.CreateDirectory(Path.Combine(Root, "senders", "auth-addresses"));
         AddProfile(SenderId, "auth@example.com", "secret@example.com");
         Trace = TraceLog.Open(Root, false, Errors);
     }
@@ -243,12 +303,9 @@ internal sealed class StoreTestFixture : IDisposable
     // Write one coherent profile and its permanent current-auth index.
     internal void AddProfile(string senderId, string auth, string privateAddress)
     {
-        string directory = Path.Combine(Root, "profiles", senderId);
+        string directory = Path.Combine(Root, "senders", "sender-ids", senderId);
         Directory.CreateDirectory(directory);
-        File.WriteAllText(Path.Combine(directory, "auth-address.txt"), auth, new UTF8Encoding(false));
         File.WriteAllText(Path.Combine(directory, "private-address.txt"), privateAddress, new UTF8Encoding(false));
-        File.WriteAllText(Path.Combine(directory, "retired-auth-addresses.txt"), "");
-        File.WriteAllText(Path.Combine(directory, "retired-private-addresses.txt"), "");
         File.WriteAllText(Path.Combine(directory, "from-template.txt"), "sender-%@tags.example.com");
         File.WriteAllText(Path.Combine(directory, "allow-mdn.txt"), "false");
         WriteIndex(auth.ToLowerInvariant(), senderId);
@@ -261,7 +318,7 @@ internal sealed class StoreTestFixture : IDisposable
     // Publish a synthetic auth index without involving the runtime's external administration scope.
     internal void WriteIndex(string address, string senderId = SenderId)
     {
-        string directory = Path.Combine(Root, "senders", address);
+        string directory = Path.Combine(Root, "senders", "auth-addresses", address);
         Directory.CreateDirectory(directory);
         File.WriteAllText(Path.Combine(directory, "sender-id.txt"), senderId);
     }

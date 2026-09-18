@@ -37,7 +37,7 @@ internal sealed class LabHost : IAsyncDisposable
             dnsTcp.Start(32);
             DnsPort = ((IPEndPoint)dnsTcp.LocalEndpoint).Port;
             openedUdp = new UdpClient(new IPEndPoint(BindAddress, DnsPort));
-            smtpTcp.Start(16);
+            smtpTcp.Start(128);
             SmtpPort = ((IPEndPoint)smtpTcp.LocalEndpoint).Port;
             dnsUdp = openedUdp;
         }
@@ -49,7 +49,8 @@ internal sealed class LabHost : IAsyncDisposable
             stop.Dispose();
             throw;
         }
-        loops = [RunUdpAsync(), AcceptAsync(dnsTcp, HandleDnsTcpAsync, 32, "DNS TCP"), AcceptAsync(smtpTcp, smtp.HandleAsync, 16, "SMTP")];
+        // Accommodate the tested SmarterMail default of 50 outbound workers without capture-side rejection.
+        loops = [RunUdpAsync(), AcceptAsync(dnsTcp, HandleDnsTcpAsync, 32, "DNS TCP"), AcceptAsync(smtpTcp, smtp.HandleAsync, 64, "SMTP")];
     }
 
     // Responds to bounded UDP questions without recursion, forwarding, or external DNS resolution.

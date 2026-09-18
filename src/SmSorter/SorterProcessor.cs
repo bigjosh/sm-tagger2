@@ -8,17 +8,19 @@ public sealed class SorterProcessor
     private readonly string inputDirectory;
     private readonly string spoolDirectory;
     private readonly string processDirectory;
-    private readonly string sendersDirectory;
+    private readonly string failedDirectory;
+    private readonly string authAddressesDirectory;
     private readonly TextWriter standardError;
     private readonly SorterDiagnostics? diagnostics;
 
-    // Bind trusted queue roots without reading profiles, mappings, or any tagger log.
+    // Bind trusted queue roots and the auth-address index without reading sender records, mappings, or tagger logs.
     public SorterProcessor(string dataDir, string spoolDir, TextWriter? stderr = null, SorterDiagnostics? diagnostics = null)
     {
         inputDirectory = Path.Combine(spoolDir, "proc");
         spoolDirectory = spoolDir;
-        processDirectory = Path.Combine(dataDir, "process");
-        sendersDirectory = Path.Combine(dataDir, "senders");
+        processDirectory = MailQueuePaths.ProcessDirectory(spoolDir);
+        failedDirectory = MailQueuePaths.FailedDirectory(spoolDir);
+        authAddressesDirectory = Path.Combine(dataDir, "senders", "auth-addresses");
         standardError = stderr ?? Console.Error;
         this.diagnostics = diagnostics;
     }
@@ -40,7 +42,7 @@ public sealed class SorterProcessor
 
         try
         {
-            // VERSION-SENSITIVE-001: Final EML publication, not provisional HDR visibility, admits work.
+            // VERSION-SENSITIVE-001: Final EML visibility admits a candidate, not ownership or delivery.
             try
             {
                 FileAttributes attributes = File.GetAttributes(sourceEml);
@@ -60,8 +62,18 @@ public sealed class SorterProcessor
             diagnostics?.Debug(basename, "READ_HDR", ("path", sourceHdr));
             byte[] hdr = File.ReadAllBytes(sourceHdr);
             int statusEnd = hdr.AsSpan().IndexOf("\r\n"u8);
+            // VERSION-SENSITIVE-001: Only Written permits routing; retain the read's exclusion of writers.
+            // Unknown or incomplete statuses remain producer-owned; see written-readiness-2026-09-17.md.
+            if (statusEnd < 0)
+                return NotReady(basename, watchMode, "HDR_STATUS_UNEXPECTED", sourceHdr, sourceEml, "<missing CRLF>");
+            ReadOnlySpan<byte> status = hdr.AsSpan(0, statusEnd).TrimEnd(" \t"u8);
+            if (status.SequenceEqual("Writing"u8))
+                return NotReady(basename, watchMode, "HDR_WRITING", sourceHdr, sourceEml, "Writing");
+            if (!status.SequenceEqual("Written"u8) && !status.SequenceEqual("Failed"u8))
+                return NotReady(basename, watchMode, "HDR_STATUS_UNEXPECTED", sourceHdr, sourceEml,
+                    Encoding.Latin1.GetString(status));
             operation = "classify HDR";
-            if (statusEnd >= 0 && hdr.AsSpan(0, statusEnd).TrimEnd(" \t"u8).SequenceEqual("Failed"u8))
+            if (status.SequenceEqual("Failed"u8))
             {
                 routeReason = "UPSTREAM_FAILED";
                 holdReason = new InvalidDataException("SmarterMail marked the message Failed.");
@@ -79,14 +91,14 @@ public sealed class SorterProcessor
                 {
                     operation = "look up authenticated enrollment";
                     routeReason = "UNENROLLED_AUTH";
-                    diagnostics?.Debug(basename, "AUTH_LOOKUP", ("auth", canonicalAuth), ("root", sendersDirectory));
-                    FileAttributes rootAttributes = File.GetAttributes(sendersDirectory);
+                    diagnostics?.Debug(basename, "AUTH_LOOKUP", ("auth", canonicalAuth), ("root", authAddressesDirectory));
+                    FileAttributes rootAttributes = File.GetAttributes(authAddressesDirectory);
                     if ((rootAttributes & FileAttributes.Directory) == 0)
                     {
-                        throw new IOException("The senders root is not a directory.");
+                        throw new IOException("The senders/auth-addresses root is not a directory.");
                     }
 
-                    string authDirectory = Path.Combine(sendersDirectory, canonicalAuth!);
+                    string authDirectory = Path.Combine(authAddressesDirectory, canonicalAuth!);
                     try
                     {
                         FileAttributes attributes = File.GetAttributes(authDirectory);
@@ -155,6 +167,9 @@ public sealed class SorterProcessor
 
         if (holdReason is not null)
         {
+            if (routeReason == "UPSTREAM_FAILED")
+                return RetainUpstreamFailure(basename, currentHdr, currentEml, holdReason);
+
             diagnostics?.Message(basename, "ERROR", canonicalAuth, routeReason, operation,
                 currentHdr, currentEml, destination, holdReason);
             ReportFailure(basename, "The HDR was held because safe routing could not be established.", operation,
@@ -199,16 +214,55 @@ public sealed class SorterProcessor
         }
     }
 
-    // Leave unready inputs untouched and explain a one-shot deferral without terminal result logging.
-    private MessageOutcome NotReady(string basename, bool watchMode, string reason, string hdr, string eml)
+    // Preserve upstream-failed bytes outside SmarterMail's queues without publishing, replacing, or rolling back files.
+    private MessageOutcome RetainUpstreamFailure(string basename, string currentHdr, string currentEml, Exception upstreamError)
+    {
+        string operation = "create failed retention directory";
+        string destination = failedDirectory;
+        string reason = "SmarterMail marked the message Failed; retained files require manual investigation.";
+        Exception reportedError = upstreamError;
+        try
+        {
+            // VERSION-SENSITIVE-001: SM deletes Failed pairs returned to spool; see failed-spool-2026-09-16.md.
+            diagnostics?.Debug(basename, "CREATE_DIRECTORY", ("path", failedDirectory));
+            Directory.CreateDirectory(failedDirectory);
+            operation = "retain failed EML";
+            destination = Path.Combine(failedDirectory, basename + ".eml");
+            diagnostics?.Debug(basename, "MOVE_INTENT", ("operation", operation), ("source", currentEml), ("destination", destination));
+            File.Move(currentEml, destination, overwrite: false);
+            currentEml = destination;
+            diagnostics?.Debug(basename, "MOVE_OK", ("operation", operation), ("eml", currentEml));
+            operation = "retain failed HDR";
+            destination = Path.Combine(failedDirectory, basename + ".hdr.sort");
+            diagnostics?.Debug(basename, "MOVE_INTENT", ("operation", operation), ("source", currentHdr), ("destination", destination));
+            File.Move(currentHdr, destination, overwrite: false);
+            currentHdr = destination;
+            diagnostics?.Debug(basename, "MOVE_OK", ("operation", operation), ("hdr", currentHdr));
+        }
+        catch (Exception error)
+        {
+            reason = "SmarterMail marked the message Failed; the sorter could not complete retention. Files remain at the recorded locations.";
+            reportedError = error;
+        }
+
+        diagnostics?.Message(basename, "ERROR", null, "UPSTREAM_FAILED", operation,
+            currentHdr, currentEml, destination, reportedError);
+        ReportFailure(basename, reason, operation, currentHdr, currentEml, destination, null, reportedError);
+        return MessageOutcome.Failed;
+    }
+
+    // Leave unready inputs untouched; report unexpected statuses even in watch mode without terminal logging.
+    private MessageOutcome NotReady(string basename, bool watchMode, string reason, string hdr, string eml,
+        string? status = null)
     {
         try
         {
-            diagnostics?.Debug(basename, "DEFER", ("reason", reason), ("hdr", hdr), ("eml", eml));
-            if (!watchMode)
+            diagnostics?.Debug(basename, "DEFER", ("reason", reason), ("hdr", hdr), ("eml", eml), ("status", status));
+            if (!watchMode || reason == "HDR_STATUS_UNEXPECTED")
             {
                 ConsoleErrors.Write(standardError, "NOT READY sorter input left untouched basename=" + ConsoleErrors.Quote(basename)
                     + " reason=" + reason
+                    + (status is null ? "" : " status=" + ConsoleErrors.Quote(status))
                     + " HDR=" + ConsoleErrors.Quote(hdr) + " EML=" + ConsoleErrors.Quote(eml));
             }
         }
@@ -271,7 +325,7 @@ public sealed class SorterProcessor
                 + "canonicalAuth=" + ConsoleErrors.Quote(canonicalAuth ?? "-") + "\r\n"
                 + "error=" + ConsoleErrors.FormatException(error) + "\r\n";
             ConsoleErrors.Write(standardError, details);
-            string diagnostic = Path.Combine(inputDirectory, basename + ".sort.err");
+            string diagnostic = Path.Combine(Path.GetDirectoryName(currentHdr)!, basename + ".sort.err");
             try
             {
                 byte[] bytes = new UTF8Encoding(false, true).GetBytes(details);

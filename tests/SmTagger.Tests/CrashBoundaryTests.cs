@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using SmTagger.Shared;
 
 namespace SmTagger.Tests;
 
@@ -31,7 +32,21 @@ public sealed class CrashBoundaryTests
             await WaitUntilAsync(() => File.Exists(signalPath), interrupted);
             Assert.Equal(phase, File.ReadAllText(signalPath));
             Assert.False(interrupted.Process.HasExited);
+            Assert.Throws<IOException>(() =>
+            {
+                using var denied = SingletonLock.Acquire(Path.Combine(fixture.DataDirectory, "sm-tagger.lock"));
+            });
+            Assert.Throws<IOException>(() =>
+            {
+                using var denied = SingletonLock.Acquire(Path.Combine(fixture.WorkDirectory, "sm-tagger.lock"));
+            });
             interrupted.Stop();
+        }
+
+        using (SingletonLock releasedData = SingletonLock.Acquire(Path.Combine(fixture.DataDirectory, "sm-tagger.lock")))
+        using (SingletonLock releasedQueue = SingletonLock.Acquire(Path.Combine(fixture.WorkDirectory, "sm-tagger.lock")))
+        {
+            Assert.True(File.Exists(Path.Combine(fixture.WorkDirectory, "sm-tagger.lock")));
         }
 
         BoundaryState expected = ExpectedState(phase);
@@ -157,7 +172,7 @@ public sealed class CrashBoundaryTests
         File.Move(hdr, Path.Combine(fixture.ProcessDirectory, "fresh.hdr"), overwrite: false);
     }
 
-    // Record every retained file's complete bytes and every child directory without treating optional roots as evidence.
+    // Record retained mail and directories without opening the independently verified active queue lock.
     private static SortedDictionary<string, string> Snapshot(string root)
     {
         var snapshot = new SortedDictionary<string, string>(StringComparer.Ordinal);
@@ -165,6 +180,8 @@ public sealed class CrashBoundaryTests
             return snapshot;
         foreach (string path in Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories))
         {
+            if (path.EndsWith(Path.Combine("proc", "sm-tagger", "sm-tagger.lock"), StringComparison.OrdinalIgnoreCase))
+                continue;
             string relative = Path.GetRelativePath(root, path);
             if ((File.GetAttributes(path) & FileAttributes.Directory) != 0)
                 snapshot.Add("D|" + relative, "");

@@ -4,7 +4,7 @@ namespace SmTagger.Tests;
 
 public sealed class QueueWatcherTests
 {
-    // Scan the initial backlog in ordinal order while excluding directories and suffixed files.
+    // Scan only direct backlog in ordinal order, excluding suffixed files and the nested private working queues.
     [Theory]
     [InlineData(".hdr")]
     [InlineData(".eml")]
@@ -19,8 +19,10 @@ public sealed class QueueWatcherTests
         }
 
         Directory.CreateDirectory(tree.Input("directory" + inputExtension));
-        Directory.CreateDirectory(tree.Input("nested"));
-        File.WriteAllText(tree.Input("nested/child" + inputExtension), "fixture");
+        Directory.CreateDirectory(tree.Work("process"));
+        Directory.CreateDirectory(tree.Work("failed"));
+        File.WriteAllText(tree.Work("process/child" + inputExtension), "queued working fixture");
+        File.WriteAllText(tree.Work("failed/child" + inputExtension), "retained working fixture");
         List<string> observed = [];
         List<string[]> scans = [];
         QueueWatcher? active = null;
@@ -38,6 +40,8 @@ public sealed class QueueWatcherTests
         watcher.Run();
         Assert.Equal(["B", "a", "z"], observed);
         Assert.Equal(["B", "a", "z"], Assert.Single(scans));
+        Assert.Equal("queued working fixture", File.ReadAllText(tree.Work("process/child" + inputExtension)));
+        Assert.Equal("retained working fixture", File.ReadAllText(tree.Work("failed/child" + inputExtension)));
     }
 
     // A stop recorded before discovery prevents any initial message claim.

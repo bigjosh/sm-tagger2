@@ -27,7 +27,10 @@ public static class Program
                 return 1;
             }
 
-            using var singleton = SingletonLock.Acquire(Path.Combine(invocation.DataDirectory, "sm-tagger.lock"));
+            using var dataSingleton = SingletonLock.Acquire(Path.Combine(invocation.DataDirectory, "sm-tagger.lock"));
+            // VERSION-SENSITIVE-001: SmarterMail leaves our nested Proc workspace to the external processors.
+            Directory.CreateDirectory(MailQueuePaths.WorkDirectory(invocation.SpoolDirectory));
+            using var queueSingleton = SingletonLock.Acquire(MailQueuePaths.TaggerLockPath(invocation.SpoolDirectory));
             using var trace = TraceLog.Open(invocation.DataDirectory, invocation.Log);
             trace.Event("-", "STARTUP", "BEGIN", ("dataDirectory", invocation.DataDirectory),
                 ("spoolDirectory", invocation.SpoolDirectory), ("basename", invocation.Basename),
@@ -36,10 +39,10 @@ public static class Program
             {
                 var configuration = SenderConfiguration.Load(invocation.DataDirectory, trace);
                 var tags = TagStore.Load(invocation.DataDirectory, configuration, trace);
-                var processDirectory = Path.Combine(invocation.DataDirectory, "process");
+                var processDirectory = MailQueuePaths.ProcessDirectory(invocation.SpoolDirectory);
                 trace.Transition("-", "create-directory", null, processDirectory,
                     () => Directory.CreateDirectory(processDirectory));
-                var processor = new TaggerProcessor(invocation.DataDirectory, invocation.SpoolDirectory,
+                var processor = new TaggerProcessor(invocation.SpoolDirectory,
                     configuration, tags, trace, invocation.Keep);
                 return Run(invocation, processor, trace);
             }
@@ -83,7 +86,7 @@ public static class Program
             }
 
             processor.ReportResiduals();
-            watcher = new QueueWatcher(Path.Combine(invocation.DataDirectory, "process"),
+            watcher = new QueueWatcher(MailQueuePaths.ProcessDirectory(invocation.SpoolDirectory),
                 basename => processor.Process(basename, watchMode: true),
                 basenames => trace.Event("-", "QUEUE_SCAN", "OK", ("count", basenames.Count), ("basenames", basenames)));
             if (Volatile.Read(ref stopRequested) != 0)

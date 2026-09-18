@@ -16,15 +16,20 @@ public sealed class ConfigurationExampleTests
 
         Assert.NotNull(directory);
         string dataDirectory = Path.Combine(directory.FullName, "examples", "datadir");
+        Assert.True(Directory.Exists(Path.Combine(dataDirectory, "senders", "auth-addresses", "auth@example.com")));
+        Assert.True(Directory.Exists(Path.Combine(dataDirectory, "senders", "sender-ids",
+            "22222222-2222-4222-8222-222222222222")));
         using var trace = TraceLog.Open(dataDirectory, enabled: false);
         SenderConfiguration configuration = SenderConfiguration.Load(dataDirectory, trace);
         SenderProfile profile = Assert.Single(configuration.Profiles).Value;
         Assert.Same(profile, configuration.Resolve("auth@example.com"));
+        Assert.Same(profile, configuration.Resolve("alias@example.com"));
         Assert.Equal("22222222-2222-4222-8222-222222222222", profile.SenderId);
         Assert.Equal("replace-with-private-alias@example.com", profile.PrivateAddress);
         Assert.Equal("tag-%@reply.example.com", profile.Template);
         Assert.False(profile.AllowMdn);
-        Assert.Empty(profile.RetiredAuthAddresses);
-        Assert.Empty(profile.RetiredPrivateAddresses);
+        Assert.Equal(new[] { "allow-mdn.txt", "from-template.txt", "private-address.txt" },
+            Directory.GetFiles(Path.Combine(dataDirectory, "senders", "sender-ids", profile.SenderId))
+                .Select(Path.GetFileName).Order(StringComparer.Ordinal));
     }
 }

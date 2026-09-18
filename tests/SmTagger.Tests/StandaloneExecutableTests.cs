@@ -79,6 +79,7 @@ public sealed class StandaloneExecutableTests
 
         Assert.Equal(before, SnapshotQueues(fixture));
         Assert.False(File.Exists(Path.Combine(fixture.DataDirectory, "sm-tagger.lock")));
+        Assert.False(File.Exists(Path.Combine(fixture.WorkDirectory, "sm-tagger.lock")));
         Assert.False(File.Exists(Path.Combine(fixture.SpoolDirectory, "proc", "sm-sorter.lock")));
     }
 
@@ -173,6 +174,38 @@ public sealed class StandaloneExecutableTests
             Assert.False(File.Exists(logfile));
             Assert.False(File.Exists(Path.Combine(fixture.DataDirectory, "log.txt")));
         }
+    }
+
+    // The real standalone sorter returns one-shot failure after preserving an upstream-rejected pair in private Proc storage.
+    [StandaloneFact]
+    public async Task StandaloneSorterMovesUpstreamFailureOutsideSpool()
+    {
+        using var fixture = new ProcessorFixture();
+        string binaryDirectory = CopyExecutables(fixture, "sm-sorter");
+        string logfile = Path.Combine(fixture.Root, "sorter-upstream-failed.log");
+        var originals = fixture.WriteMessage("rejected",
+            "Failed \t\r\nmalformed remainder need not be parsed\n", body: [0, 255, 13, 10]);
+        MoveToSorter(fixture, "rejected");
+        string holding = fixture.FailedDirectory;
+        Assert.False(Directory.Exists(holding));
+
+        var result = await RunAsync(binaryDirectory, "sm-sorter", fixture,
+            [fixture.DataDirectory, "-l", logfile, fixture.SpoolDirectory, "rejected"]);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Empty(result.Output);
+        Assert.Equal(originals.Hdr, File.ReadAllBytes(Path.Combine(holding, "rejected.hdr.sort")));
+        Assert.Equal(originals.Eml, File.ReadAllBytes(Path.Combine(holding, "rejected.eml")));
+        Assert.True(File.Exists(Path.Combine(holding, "rejected.sort.err")));
+        Assert.Contains(SmTagger.Shared.ConsoleErrors.Quote(Path.Combine(holding, "rejected.hdr.sort")), result.Error);
+        Assert.Contains(SmTagger.Shared.ConsoleErrors.Quote(Path.Combine(holding, "rejected.eml")), result.Error);
+        string record = Assert.Single(File.ReadAllLines(logfile));
+        AssertSorterLogRecord(record, "ERROR", "rejected");
+        Assert.Contains("reason=\"UPSTREAM_FAILED\"", record);
+        Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory, "*.hdr"));
+        Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory, "*.eml"));
+        Assert.Empty(Directory.GetFiles(Path.Combine(fixture.SpoolDirectory, "proc"), "rejected.*"));
+        Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory));
     }
 
     // Records held mail as ERROR while stderr remains active and both original message files stay inert.

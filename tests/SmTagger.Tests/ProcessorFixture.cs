@@ -12,9 +12,11 @@ internal sealed class ProcessorFixture : IDisposable
 
     public string Root { get; }
     public string DataDirectory { get; }
-    public string ProcessDirectory => Path.Combine(DataDirectory, "process");
+    public string WorkDirectory => Path.Combine(SpoolDirectory, "proc", "sm-tagger");
+    public string ProcessDirectory => Path.Combine(SpoolDirectory, "proc", "sm-tagger", "process");
+    public string FailedDirectory => Path.Combine(WorkDirectory, "failed");
     public string SpoolDirectory { get; }
-    public string ProfileDirectory => Path.Combine(DataDirectory, "profiles", SenderId);
+    public string ProfileDirectory => Path.Combine(DataDirectory, "senders", "sender-ids", SenderId);
     public StringWriter Errors { get; } = new();
 
     // Creates a private isolated filesystem and one complete synthetic enrolled profile.
@@ -27,12 +29,9 @@ internal sealed class ProcessorFixture : IDisposable
         Directory.CreateDirectory(ProcessDirectory);
         Directory.CreateDirectory(Path.Combine(SpoolDirectory, "proc"));
         Directory.CreateDirectory(ProfileDirectory);
-        Directory.CreateDirectory(Path.Combine(DataDirectory, "senders", Auth));
-        File.WriteAllText(Path.Combine(DataDirectory, "senders", Auth, "sender-id.txt"), SenderId);
-        WriteProfile("auth-address.txt", Auth);
+        Directory.CreateDirectory(Path.Combine(DataDirectory, "senders", "auth-addresses", Auth));
+        File.WriteAllText(Path.Combine(DataDirectory, "senders", "auth-addresses", Auth, "sender-id.txt"), SenderId);
         WriteProfile("private-address.txt", Private);
-        WriteProfile("retired-auth-addresses.txt", "");
-        WriteProfile("retired-private-addresses.txt", "");
         WriteProfile("from-template.txt", "tag-%@reply.example.com\r\nSynthetic fixture");
         WriteProfile("allow-mdn.txt", "false");
     }
@@ -81,7 +80,7 @@ internal sealed class ProcessorFixture : IDisposable
                 () => new DateTimeOffset(2026, 9, 5, 12, 34, 56, TimeSpan.Zero),
                 random ?? (bytes => Array.Fill(bytes, ++counter)));
             return new ProcessorHarness(trace, configuration, tags,
-                new TaggerProcessor(DataDirectory, SpoolDirectory, configuration, tags, trace, keep));
+                new TaggerProcessor(SpoolDirectory, configuration, tags, trace, keep));
         }
         catch
         {

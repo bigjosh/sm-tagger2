@@ -27,9 +27,9 @@ public sealed class SorterDiagnosticsTests
             _ => "auth: Account@Example.com\r\n"
         };
         if (arrangement == "enrolled")
-            Directory.CreateDirectory(tree.Data("senders/account@example.com"));
+            Directory.CreateDirectory(tree.Data("senders/auth-addresses/account@example.com"));
         else if (arrangement == "unenrolled")
-            Directory.CreateDirectory(tree.Data("senders"));
+            Directory.CreateDirectory(tree.Data("senders/auth-addresses"));
         byte[] hdr = tree.AddMessage("message", metadata);
         byte[] eml = [0, 255, 13, 10, 42];
         File.WriteAllBytes(tree.Input("message.eml"), eml);
@@ -41,7 +41,7 @@ public sealed class SorterDiagnosticsTests
             Assert.Equal(MessageOutcome.Succeeded, processor.Process("message"));
         }
 
-        string destination = arrangement == "enrolled" ? tree.Data("process") : tree.Spool("");
+        string destination = arrangement == "enrolled" ? tree.Work("process") : tree.Spool("");
         Assert.Equal(hdr, File.ReadAllBytes(Path.Combine(destination, "message.hdr")));
         Assert.Equal(eml, File.ReadAllBytes(Path.Combine(destination, "message.eml")));
         string line = Assert.Single(Lines(bytes));
@@ -89,8 +89,9 @@ public sealed class SorterDiagnosticsTests
         byte[] eml = File.ReadAllBytes(tree.Input("held.eml"));
         if (arrangement == "process-is-file")
         {
-            Directory.CreateDirectory(tree.Data("senders/account@example.com"));
-            File.WriteAllText(tree.Data("process"), "existing evidence");
+            Directory.CreateDirectory(tree.Data("senders/auth-addresses/account@example.com"));
+            Directory.CreateDirectory(tree.Work(""));
+            File.WriteAllText(tree.Work("process"), "existing evidence");
         }
         SorterProcessor processor = new(tree.Data(""), tree.Spool(""), tree.Errors, diagnostics);
 
@@ -105,7 +106,7 @@ public sealed class SorterDiagnosticsTests
         if (arrangement == "process-is-file")
         {
             Assert.Contains("operation=\"create process queue directory\"", line);
-            Assert.Equal("existing evidence", File.ReadAllText(tree.Data("process")));
+            Assert.Equal("existing evidence", File.ReadAllText(tree.Work("process")));
         }
     }
 
@@ -120,10 +121,10 @@ public sealed class SorterDiagnosticsTests
         using SorterDiagnostics diagnostics = Open(tree, bytes);
         byte[] hdr = tree.AddMessage("partial", divert ? "auth: account@example.com\r\n" : "");
         byte[] eml = File.ReadAllBytes(tree.Input("partial.eml"));
-        string destination = divert ? tree.Data("process") : tree.Spool("");
+        string destination = divert ? tree.Work("process") : tree.Spool("");
         if (divert)
         {
-            Directory.CreateDirectory(tree.Data("senders/account@example.com"));
+            Directory.CreateDirectory(tree.Data("senders/auth-addresses/account@example.com"));
             Directory.CreateDirectory(destination);
         }
         string destinationHdr = Path.Combine(destination, "partial.hdr");

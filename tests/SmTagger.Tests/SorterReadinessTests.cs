@@ -29,17 +29,15 @@ public sealed class SorterReadinessTests
         Assert.Contains("operation=\"check EML readiness\"", fixture.Output.ToString());
         Assert.DoesNotContain("event=READ_HDR", fixture.Output.ToString());
         Assert.Empty(fixture.Tree.Errors.ToString());
-        Assert.False(Directory.Exists(fixture.Tree.Data("senders")));
+        Assert.False(Directory.Exists(fixture.Tree.Data("senders/auth-addresses")));
     }
 
-    // The final EML is the readiness signal, while all non-Failed statuses remain opaque metadata.
+    // Only exact Written with optional trailing ASCII space/tab admits the existing HDR classification path.
     [Theory]
-    [InlineData("Writing")]
-    [InlineData("Quarantined")]
-    [InlineData("Unknown")]
-    [InlineData("written")]
-    [InlineData("failed")]
-    public void FinalEmlMakesNonFailedStatusEligible(string status)
+    [InlineData("Written")]
+    [InlineData("Written ")]
+    [InlineData("Written\t \t")]
+    public void FinalEmlAndWrittenStatusMakePairEligible(string status)
     {
         using ReadinessFixture fixture = new();
         byte[] hdr = Encoding.ASCII.GetBytes(status + "\r\nsender@example.com\r\nrecipient@example.net\r\n\r\n");
@@ -69,10 +67,12 @@ public sealed class SorterReadinessTests
 
         Assert.Equal(MessageOutcome.Failed, fixture.Processor.Process("failed", watchMode: true));
 
-        Assert.Equal(hdr, File.ReadAllBytes(fixture.Tree.Input("failed.hdr.sort")));
-        Assert.Equal(eml, File.ReadAllBytes(fixture.Tree.Input("failed.eml")));
+        Assert.Equal(hdr, File.ReadAllBytes(fixture.Tree.Work("failed/failed.hdr.sort")));
+        Assert.Equal(eml, File.ReadAllBytes(fixture.Tree.Work("failed/failed.eml")));
         Assert.False(File.Exists(fixture.Tree.Input("failed.hdr")));
-        Assert.True(File.Exists(fixture.Tree.Input("failed.sort.err")));
+        Assert.False(File.Exists(fixture.Tree.Input("failed.hdr.sort")));
+        Assert.False(File.Exists(fixture.Tree.Input("failed.eml")));
+        Assert.True(File.Exists(fixture.Tree.Work("failed/failed.sort.err")));
         Assert.False(File.Exists(fixture.Tree.Spool("failed.hdr")));
         string record = Assert.Single(fixture.Records());
         Assert.Contains("result=ERROR", record);
@@ -85,12 +85,12 @@ public sealed class SorterReadinessTests
         Assert.Contains("result=PASS", fixture.Records()[1]);
     }
 
-    // Once the final EML exists, malformed HDR framing is a real contract error rather than deferred input.
+    // A readable Written status admits validation of the remaining HDR, whose malformed bytes are still held.
     [Theory]
-    [InlineData("")]
-    [InlineData("Writ")]
-    [InlineData("Writing \r\ninvalid incomplete framing")]
-    public void MalformedHdrWithFinalEmlIsHeld(string content)
+    [InlineData("Written\r\n")]
+    [InlineData("Written \r\ninvalid incomplete framing")]
+    [InlineData("Written\r\nsender@example.com\r\nrecipient@example.net\r\ninvalid metadata\r\n\r\n")]
+    public void MalformedHdrAfterWrittenStatusIsHeld(string content)
     {
         using ReadinessFixture fixture = new();
         byte[] hdr = Encoding.ASCII.GetBytes(content);
@@ -151,6 +151,53 @@ public sealed class SorterReadinessTests
         Assert.Contains("result=PASS", Assert.Single(fixture.Records()));
     }
 
+    // A producer that permits readers is still excluded by the sorter's reciprocal sharing contract.
+    [Theory]
+    [InlineData(FileShare.Read)]
+    [InlineData(FileShare.ReadWrite | FileShare.Delete)]
+    public void ReaderPermittingHdrWriterStillDefersUntilClosed(FileShare producerSharing)
+    {
+        using ReadinessFixture fixture = new();
+        byte[] eml = [0, 255, 42, 13, 10];
+        byte[] prefix = Encoding.ASCII.GetBytes("Written \r\nsender@example.com\r\n");
+        byte[] suffix = Encoding.ASCII.GetBytes("recipient@example.net\r\n\r\n");
+        File.WriteAllBytes(fixture.Tree.Input("reader-shared.eml"), eml);
+
+        using (FileStream writer = new(fixture.Tree.Input("reader-shared.hdr"), FileMode.CreateNew,
+            FileAccess.Write, producerSharing))
+        {
+            writer.Write(prefix);
+            writer.Flush();
+            using (FileStream permissiveReader = new(fixture.Tree.Input("reader-shared.hdr"), FileMode.Open,
+                FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                byte[] visiblePrefix = new byte[prefix.Length];
+                permissiveReader.ReadExactly(visiblePrefix);
+                Assert.Equal(prefix, visiblePrefix);
+            }
+
+            Assert.Equal(MessageOutcome.Deferred, fixture.Processor.Process("reader-shared", watchMode: true));
+            Assert.True(File.Exists(fixture.Tree.Input("reader-shared.hdr")));
+            Assert.True(File.Exists(fixture.Tree.Input("reader-shared.eml")));
+            Assert.False(File.Exists(fixture.Tree.Input("reader-shared.hdr.sort")));
+            Assert.False(File.Exists(fixture.Tree.Input("reader-shared.sort.err")));
+            Assert.False(File.Exists(fixture.Tree.Spool("reader-shared.hdr")));
+            Assert.False(File.Exists(fixture.Tree.Spool("reader-shared.eml")));
+            Assert.Empty(fixture.Records());
+            Assert.Empty(fixture.Tree.Errors.ToString());
+            Assert.Contains("reason=\"HDR_BUSY\"", fixture.Output.ToString());
+
+            writer.Write(suffix);
+            writer.Flush();
+        }
+
+        Assert.Equal(MessageOutcome.Succeeded, fixture.Processor.Process("reader-shared", watchMode: true));
+        Assert.Equal([.. prefix, .. suffix], File.ReadAllBytes(fixture.Tree.Spool("reader-shared.hdr")));
+        Assert.Equal(eml, File.ReadAllBytes(fixture.Tree.Spool("reader-shared.eml")));
+        Assert.Contains("result=PASS", Assert.Single(fixture.Records()));
+        Assert.Empty(fixture.Tree.Errors.ToString());
+    }
+
     // Replacement at completion must use the final envelope and auth instead of the provisional header.
     [Fact]
     public void FinalEmlPublicationUsesTheCompletedReplacementHdr()
@@ -160,7 +207,7 @@ public sealed class SorterReadinessTests
         File.WriteAllBytes(fixture.Tree.Input("replacement.hdr"), provisional);
         AssertMissingEmlLeavesInput(fixture, "replacement", provisional);
 
-        Directory.CreateDirectory(fixture.Tree.Data("senders/final@example.com"));
+        Directory.CreateDirectory(fixture.Tree.Data("senders/auth-addresses/final@example.com"));
         byte[] finalHdr = Encoding.ASCII.GetBytes("Written \t\r\nfinal@example.com\r\nfinal@example.net\r\n"
             + "auth: FINAL@EXAMPLE.COM\r\nopaque: completed metadata\r\n\r\n");
         byte[] finalEml = [0, 255, 42, 13, 10, 0, 128];
@@ -173,8 +220,8 @@ public sealed class SorterReadinessTests
 
         Assert.Equal(MessageOutcome.Succeeded, fixture.Processor.Process("replacement", watchMode: true));
 
-        Assert.Equal(finalHdr, File.ReadAllBytes(fixture.Tree.Data("process/replacement.hdr")));
-        Assert.Equal(finalEml, File.ReadAllBytes(fixture.Tree.Data("process/replacement.eml")));
+        Assert.Equal(finalHdr, File.ReadAllBytes(fixture.Tree.Work("process/replacement.hdr")));
+        Assert.Equal(finalEml, File.ReadAllBytes(fixture.Tree.Work("process/replacement.eml")));
         Assert.False(File.Exists(fixture.Tree.Spool("replacement.hdr")));
         Assert.False(File.Exists(fixture.Tree.Input("replacement.sort.err")));
         string record = Assert.Single(fixture.Records());
@@ -194,7 +241,7 @@ public sealed class SorterReadinessTests
         Assert.False(File.Exists(fixture.Tree.Input(basename + ".sort.err")));
         Assert.False(File.Exists(fixture.Tree.Spool(basename + ".hdr")));
         Assert.False(File.Exists(fixture.Tree.Spool(basename + ".eml")));
-        Assert.False(Directory.Exists(fixture.Tree.Data("process")));
+        Assert.False(Directory.Exists(fixture.Tree.Work("process")));
         Assert.Empty(fixture.Records());
     }
 

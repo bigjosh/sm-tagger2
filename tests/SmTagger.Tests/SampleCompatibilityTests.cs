@@ -228,18 +228,15 @@ internal sealed class LocalSampleFixture : IDisposable
         root = Path.Combine(temporaryRoot, Guid.NewGuid().ToString("N"));
         dataDirectory = Path.Combine(root, "data");
         spoolDirectory = Path.Combine(root, "spool");
-        ProcessDirectory = Path.Combine(dataDirectory, "process");
+        ProcessDirectory = Path.Combine(spoolDirectory, "proc", "sm-tagger", "process");
         Directory.CreateDirectory(ProcessDirectory);
         Directory.CreateDirectory(spoolDirectory);
-        string profile = Path.Combine(dataDirectory, "profiles", SenderId);
-        string authIndex = Path.Combine(dataDirectory, "senders", authAddress);
+        string profile = Path.Combine(dataDirectory, "senders", "sender-ids", SenderId);
+        string authIndex = Path.Combine(dataDirectory, "senders", "auth-addresses", authAddress);
         Directory.CreateDirectory(profile);
         Directory.CreateDirectory(authIndex);
         File.WriteAllText(Path.Combine(authIndex, "sender-id.txt"), SenderId);
-        File.WriteAllText(Path.Combine(profile, "auth-address.txt"), authAddress);
         File.WriteAllText(Path.Combine(profile, "private-address.txt"), privateAddress);
-        File.WriteAllText(Path.Combine(profile, "retired-auth-addresses.txt"), "");
-        File.WriteAllText(Path.Combine(profile, "retired-private-addresses.txt"), "");
         File.WriteAllText(Path.Combine(profile, "allow-mdn.txt"), "false");
         File.WriteAllText(Path.Combine(profile, "from-template.txt"), "sample-%@reply.example", new UTF8Encoding(false));
     }
@@ -263,7 +260,7 @@ internal sealed class LocalSampleFixture : IDisposable
                 () => new DateTimeOffset(2026, 9, 5, 12, 0, 0, TimeSpan.Zero),
                 bytes => Array.Fill(bytes, ++token));
             return new ProcessorHarness(trace, configuration, tags,
-                new TaggerProcessor(dataDirectory, spoolDirectory, configuration, tags, trace));
+                new TaggerProcessor(spoolDirectory, configuration, tags, trace));
         }
         catch
         {
