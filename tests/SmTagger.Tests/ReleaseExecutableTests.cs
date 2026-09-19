@@ -19,10 +19,12 @@ public sealed class ReleaseExecutableTests
         Assert.Equal(0, sorter.ExitCode);
         Assert.Equal(originals.Hdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "-42.hdr")));
         var tagger = await RunAsync("sm-tagger", fixture,
-            [fixture.DataDirectory, "-keep", "-log", fixture.SpoolDirectory, "-42"]);
+            [fixture.DataDirectory, "-keep", "-l", Path.Combine(fixture.DataDirectory, "log.txt"), fixture.SpoolDirectory, "-42"]);
         Assert.Equal(0, tagger.ExitCode);
         Assert.Equal("", tagger.Error);
         Assert.Equal(2, Directory.GetFiles(fixture.SpoolDirectory, "*.hdr").Length);
+        Assert.Equal(["-42c1.eml", "-42c1.hdr", "-42c2.eml", "-42c2.hdr"],
+            Directory.GetFiles(fixture.SpoolDirectory).Select(Path.GetFileName).Order(StringComparer.Ordinal));
         using var loaded = fixture.Open();
         Assert.Equal(3, loaded.Tags.Mappings.Count);
         Assert.Contains("hdrMarker=\"Written \"", File.ReadAllText(Path.Combine(fixture.DataDirectory, "log.txt")));
@@ -36,17 +38,17 @@ public sealed class ReleaseExecutableTests
         Directory.CreateDirectory(Path.Combine(fixture.DataDirectory, "log.txt"));
         fixture.WriteMessage("invalid", eml: ProcessorFixture.Message(""));
         var failed = await RunAsync("sm-tagger", fixture,
-            [fixture.DataDirectory, "-log", fixture.SpoolDirectory, "invalid"]);
+            [fixture.DataDirectory, "-l", Path.Combine(fixture.DataDirectory, "log.txt"), fixture.SpoolDirectory, "invalid"]);
         Assert.Equal(1, failed.ExitCode);
         Assert.Contains("exactly one From", failed.Error);
         Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "invalid.hdr.err")));
         Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "invalid.eml.err")));
         fixture.WriteMessage("valid");
         var succeeded = await RunAsync("sm-tagger", fixture,
-            [fixture.DataDirectory, "-log", fixture.SpoolDirectory, "valid"]);
+            [fixture.DataDirectory, "-l", Path.Combine(fixture.DataDirectory, "log.txt"), fixture.SpoolDirectory, "valid"]);
         Assert.Equal(0, succeeded.ExitCode);
         Assert.Contains("ERROR logging to", succeeded.Error);
-        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "valid-1.hdr")));
+        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "validc1.hdr")));
         Assert.False(File.Exists(Path.Combine(fixture.ProcessDirectory, "valid.err")));
     }
 
@@ -88,7 +90,7 @@ public sealed class ReleaseExecutableTests
         Assert.Equal(1, secondTagger.ExitCode);
         Assert.Contains("lock", secondSorter.Error, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("lock", secondTagger.Error, StringComparison.OrdinalIgnoreCase);
-        await WaitUntilAsync(() => File.Exists(Path.Combine(fixture.SpoolDirectory, "queued-1.hdr")), tagger);
+        await WaitUntilAsync(() => File.Exists(Path.Combine(fixture.SpoolDirectory, "queuedc1.hdr")), tagger);
     }
 
     // A real watcher processes existing backlog and later arrivals after retaining a local contract error.
@@ -98,13 +100,18 @@ public sealed class ReleaseExecutableTests
         using var fixture = new ProcessorFixture();
         fixture.WriteMessage("a-invalid", eml: ProcessorFixture.Message(""));
         fixture.WriteMessage("b-valid");
-        using var tagger = Start("sm-tagger", fixture, [fixture.DataDirectory, "-log", fixture.SpoolDirectory]);
-        await WaitUntilAsync(() => File.Exists(Path.Combine(fixture.SpoolDirectory, "b-valid-1.hdr")), tagger);
+        using var tagger = Start("sm-tagger", fixture, [fixture.DataDirectory, "-l", Path.Combine(fixture.DataDirectory, "log.txt"), "-v", fixture.SpoolDirectory]);
+        await WaitUntilAsync(() => File.Exists(Path.Combine(fixture.SpoolDirectory, "b-validc1.hdr")), tagger);
         Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "a-invalid.hdr.err")));
         fixture.WriteMessage("c-arrival");
-        await WaitUntilAsync(() => File.Exists(Path.Combine(fixture.SpoolDirectory, "c-arrival-1.hdr")), tagger);
+        await WaitUntilAsync(() => File.Exists(Path.Combine(fixture.SpoolDirectory, "c-arrivalc1.hdr")), tagger);
         Assert.Contains("event=QUEUE_SCAN", ReadSharedText(Path.Combine(fixture.DataDirectory, "log.txt")));
         Assert.False(tagger.Process.HasExited);
+        tagger.Stop();
+        string output = await tagger.Output.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Contains("DEBUG ", output);
+        Assert.Contains("event=QUEUE_SCAN", output);
+        Assert.Contains("context=\"c-arrival\"", output);
     }
 
     // Flushes one result per message while a real sorter watcher keeps its append log and verbose console active.
@@ -451,7 +458,7 @@ public sealed class ReleaseExecutableTests
         await WaitUntilAsync(() => OwnsLock(Path.Combine(fixture.DataDirectory, "sm-tagger.lock"))
             && OwnsLock(Path.Combine(fixture.WorkDirectory, "sm-tagger.lock")), restarted);
         fixture.WriteMessage("fresh");
-        await WaitUntilAsync(() => File.Exists(Path.Combine(fixture.SpoolDirectory, "fresh-1.hdr")), restarted);
+        await WaitUntilAsync(() => File.Exists(Path.Combine(fixture.SpoolDirectory, "freshc1.hdr")), restarted);
         foreach (var file in retained)
         {
             var path = Path.Combine(fixture.ProcessDirectory, file.Key!);

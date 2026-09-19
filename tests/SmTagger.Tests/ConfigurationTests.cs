@@ -23,13 +23,16 @@ public sealed class ConfigurationTests
 
     // Ignored annotations cannot invalidate the preceding complete template token through their encoding.
     [Theory]
-    [InlineData(" ")]
-    [InlineData("\t")]
-    [InlineData("\r\n")]
-    public void InvalidUtf8InIgnoredTemplateNotesDoesNotFailStartup(string separator)
+    [InlineData(" ", false)]
+    [InlineData("\t", false)]
+    [InlineData("\r\n", false)]
+    [InlineData(" ", true)]
+    [InlineData("\t", true)]
+    [InlineData("\r\n", true)]
+    public void InvalidUtf8InIgnoredTemplateNotesDoesNotFailStartup(string separator, bool withBom)
     {
         using var fixture = new StoreTestFixture();
-        byte[] prefix = Encoding.ASCII.GetBytes("Sender-%@TAGS.EXAMPLE.COM" + separator);
+        byte[] prefix = Encoding.UTF8.GetBytes((withBom ? "\uFEFF" : "") + "Sender-%@TAGS.EXAMPLE.COM" + separator);
         File.WriteAllBytes(Path.Combine(fixture.ProfileDirectory, "from-template.txt"), [.. prefix, 0xff, 0xc3]);
         Assert.Equal("sender-%@tags.example.com", fixture.LoadConfiguration().Profiles[StoreTestFixture.SenderId].Template);
     }
@@ -71,14 +74,21 @@ public sealed class ConfigurationTests
         Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration);
     }
 
-    // MDN policy accepts only the complete lowercase token after terminal newlines.
+    // MDN policy rejects non-boolean tokens, embedded content, and misplaced non-whitespace bytes.
     [Theory]
-    [InlineData("TRUE")]
-    [InlineData(" false")]
-    [InlineData("false ")]
     [InlineData("false\ntrue")]
     [InlineData("")]
+    [InlineData(" \t\r\n")]
+    [InlineData("1")]
+    [InlineData("0")]
+    [InlineData("yes")]
+    [InlineData("no")]
+    [InlineData("tr ue")]
     [InlineData("false # note")]
+    [InlineData("true\0")]
+    [InlineData("\0false")]
+    [InlineData("true\uFEFF")]
+    [InlineData("false\uFEFF")]
     public void MalformedMdnPolicyFailsStartup(string policy)
     {
         using var fixture = new StoreTestFixture();
@@ -86,28 +96,55 @@ public sealed class ConfigurationTests
         Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration);
     }
 
-    // Required policy permits both documented values without inventing an evidence-file requirement.
+    // Required policy accepts either boolean with arbitrary case, leading BOMs, and outer Unicode whitespace.
     [Theory]
     [InlineData("true\r\n", true)]
     [InlineData("false\n", false)]
-    public void LoadsExactMdnPolicy(string policy, bool expected)
+    [InlineData("TRUE", true)]
+    [InlineData(" false", false)]
+    [InlineData("false ", false)]
+    [InlineData(" \t\r\nTrUe\r\n\t ", true)]
+    [InlineData("\tFaLsE\t", false)]
+    [InlineData("\u2003TRUE\u00A0", true)]
+    [InlineData("\uFEFFtrue", true)]
+    [InlineData("\uFEFF \tFALSE\r\n ", false)]
+    [InlineData("\uFEFF\uFEFF TrUe\n", true)]
+    public void LoadsCaseInsensitiveMdnPolicyWithOuterWhitespace(string policy, bool expected)
     {
         using var fixture = new StoreTestFixture();
         fixture.WriteProfile("allow-mdn.txt", policy);
         Assert.Equal(expected, fixture.LoadConfiguration().Resolve("auth@example.com").AllowMdn);
     }
 
-    // An auth index cannot claim the private identity of its own or another sender record.
+    // Canonical auth and private roles may share one identity when every alias selects its owning sender.
+    [Theory]
+    [InlineData("auth@example.com")]
+    [InlineData("AUTH@EXAMPLE.COM\r\n")]
+    [InlineData("Alias@Example.COM\n")]
+    public void AuthAndPrivateIdentityMayMatchWithinTheSameSender(string privateAddress)
+    {
+        using var fixture = new StoreTestFixture();
+        fixture.WriteProfile("private-address.txt", privateAddress);
+        fixture.WriteIndex("alias@example.com");
+
+        SenderConfiguration configuration = fixture.LoadConfiguration();
+        SenderProfile profile = configuration.Resolve("auth@example.com");
+        Assert.Equal(privateAddress.TrimEnd('\r', '\n').ToLowerInvariant(), profile.PrivateAddress);
+        Assert.Same(profile, configuration.Resolve("alias@example.com"));
+        Assert.Equal(StoreTestFixture.SenderId, profile.SenderId);
+    }
+
+    // An auth index cannot claim another sender's private identity in either record enumeration order.
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void AuthAndPrivateIdentityCollisionFailsStartup(bool otherSender)
+    public void AuthAndPrivateIdentityCollisionAcrossSendersFailsStartup(bool privateOnSecondSender)
     {
         using var fixture = new StoreTestFixture();
-        if (otherSender)
+        if (privateOnSecondSender)
             fixture.AddProfile(StoreTestFixture.SecondSenderId, "other@example.com", "AUTH@EXAMPLE.COM");
         else
-            fixture.WriteProfile("private-address.txt", "AUTH@EXAMPLE.COM");
+            fixture.AddProfile(StoreTestFixture.SecondSenderId, "secret@example.com", "other-private@example.com");
         Assert.Contains("Duplicate identity", Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration).Message);
     }
 
@@ -121,12 +158,16 @@ public sealed class ConfigurationTests
     }
 
     // An indexless sender record still owns its existing permanent mappings without authorizing any auth address.
-    [Fact]
-    public void SenderWithoutAuthIndexesPreservesHistoricalMappings()
+    [Theory]
+    [InlineData(StoreTestFixture.SenderId)]
+    [InlineData("Operations Team")]
+    public void SenderWithoutAuthIndexesPreservesHistoricalMappings(string senderId)
     {
         using var fixture = new StoreTestFixture();
+        if (senderId != StoreTestFixture.SenderId)
+            Directory.Move(fixture.ProfileDirectory, Path.Combine(fixture.Root, "senders", "sender-ids", senderId));
         Directory.Move(Path.Combine(fixture.Root, "senders", "auth-addresses", "auth@example.com"), Path.Combine(fixture.Root, "outside-index"));
-        string mapping = fixture.WriteMapping("sender-11111@tags.example.com", "person@example.net;");
+        string mapping = fixture.WriteMapping("sender-11111@tags.example.com", "person@example.net;", senderId);
         SenderConfiguration configuration = fixture.LoadConfiguration();
         TagStore store = TagStore.Load(fixture.Root, configuration, fixture.Trace,
             randomBytes: _ => throw new InvalidOperationException("A historical mapping must be reused."));
@@ -134,7 +175,7 @@ public sealed class ConfigurationTests
         SenderProfile profile = Assert.Single(configuration.Profiles).Value;
         Assert.Throws<MailContractException>(() => configuration.Resolve("auth@example.com"));
         Assert.Equal(mapping, store.GetOrCreate(profile, "person@example.net;", "historical").DirectoryPath);
-        Assert.Equal(StoreTestFixture.SenderId, File.ReadAllText(Path.Combine(mapping, "sender-id.txt")));
+        Assert.Equal(senderId, File.ReadAllText(Path.Combine(mapping, "sender-id.txt")));
     }
 
     // Every active auth index must resolve to an existing sender-id record.
@@ -148,7 +189,7 @@ public sealed class ConfigurationTests
         Assert.Contains("missing sender-id", Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration).Message);
     }
 
-    // Authoritative index entries must contain a readable, canonical sender pointer before startup succeeds.
+    // Authoritative index entries must contain a readable, usable sender pointer before startup succeeds.
     [Theory]
     [InlineData("missing")]
     [InlineData("malformed")]
@@ -167,13 +208,13 @@ public sealed class ConfigurationTests
         Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration);
     }
 
-    // Invalid UUID spelling remains a configuration error despite Guid's permissive parser.
+    // Sender references remain exact even when Windows would resolve a differently cased directory name.
     [Fact]
-    public void NoncanonicalSenderIdFailsStartup()
+    public void CaseMismatchedSenderPointerFailsStartup()
     {
         using var fixture = new StoreTestFixture();
         fixture.WriteIndex("auth@example.com", StoreTestFixture.SenderId.ToUpperInvariant());
-        Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration);
+        Assert.Contains("missing sender-id", Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration).Message);
     }
 
     // Directory names themselves establish auth identities and must use canonical supported spelling.
@@ -226,18 +267,44 @@ public sealed class ConfigurationTests
         Assert.Same(restarted.Resolve("other@example.com"), restarted.Resolve("auth@example.com"));
     }
 
-    // Single-value identity reading never conceals leading bytes, BOMs, or internal line breaks.
+    // Private-address settings tolerate editor formatting while retaining their canonical address meaning.
     [Theory]
     [InlineData(" secret@example.com")]
     [InlineData("secret@example.com ")]
     [InlineData("\r\nsecret@example.com")]
-    [InlineData("\uFEFFsecret@example.com")]
+    [InlineData("\uFEFFSecret@Example.COM")]
+    [InlineData("\uFEFF \tSecret@Example.COM\r\n ")]
+    [InlineData("\uFEFF\uFEFF\u2003Secret@Example.COM\u00A0")]
+    public void LoadsPrivateAddressWithEditorFormatting(string value)
+    {
+        using var fixture = new StoreTestFixture();
+        fixture.WriteProfile("private-address.txt", value);
+        Assert.Equal("secret@example.com", fixture.LoadConfiguration().Resolve("auth@example.com").PrivateAddress);
+    }
+
+    // Editor formatting tolerance does not remove embedded content or turn a malformed address into an identity.
+    [Theory]
     [InlineData("secret@example.com\nother@example.com")]
+    [InlineData("secret@example.com\uFEFF")]
+    [InlineData("secret\uFEFF@example.com")]
+    [InlineData("secret@example.com # note")]
+    [InlineData("\uFEFF \t\r\n")]
     public void MalformedAddressFileFailsStartup(string value)
     {
         using var fixture = new StoreTestFixture();
         fixture.WriteProfile("private-address.txt", value);
         Assert.Throws<StartupConfigurationException>(fixture.LoadConfiguration);
+    }
+
+    // A leading UTF-8 BOM belongs to editor formatting rather than the template's first token.
+    [Theory]
+    [InlineData("\uFEFFSender-%@TAGS.EXAMPLE.COM notes")]
+    [InlineData("\uFEFF\uFEFF \t\r\nSender-%@TAGS.EXAMPLE.COM ignored % notes\r\n")]
+    public void LoadsTemplateWithEditorFormatting(string value)
+    {
+        using var fixture = new StoreTestFixture();
+        fixture.WriteProfile("from-template.txt", value);
+        Assert.Equal("sender-%@tags.example.com", fixture.LoadConfiguration().Profiles[StoreTestFixture.SenderId].Template);
     }
 
     // Template validation proves syntax and path usability without reading ignored annotation text.
@@ -297,7 +364,7 @@ internal sealed class StoreTestFixture : IDisposable
         Directory.CreateDirectory(Path.Combine(Root, "senders", "sender-ids"));
         Directory.CreateDirectory(Path.Combine(Root, "senders", "auth-addresses"));
         AddProfile(SenderId, "auth@example.com", "secret@example.com");
-        Trace = TraceLog.Open(Root, false, Errors);
+        Trace = TraceLog.Open(null, stderr: Errors);
     }
 
     // Write one coherent profile and its permanent current-auth index.

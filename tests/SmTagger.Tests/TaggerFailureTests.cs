@@ -125,43 +125,54 @@ public sealed class TaggerFailureTests
         using var harness = fixture.Open(log: log);
 
         Assert.Equal(MessageOutcome.Failed, harness.Processor.Process("mail"));
-        var error = Assert.Single(fixture.Errors.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries),
+        string stderr = fixture.Errors.ToString();
+        var error = Assert.Single(stderr.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries),
             line => line.Contains("basename=\"mail\"", StringComparison.Ordinal));
-        Assert.Contains("activeChild=\"mail-2\"", error);
+        Assert.Contains("activeChild=\"mailc2\"", error);
         Assert.Contains("operation=\"rewrite-eml-and-check-header-length\"", error);
-        Assert.Contains("source=" + TraceLog.Quote(Path.Combine(fixture.ProcessDirectory, "mail.eml.break")), error);
-        Assert.Contains("destination=" + TraceLog.Quote(Path.Combine(fixture.ProcessDirectory, "mail-2.eml.process")), error);
-        Assert.Contains("parentHdr=" + TraceLog.Quote(Path.Combine(fixture.ProcessDirectory, "mail.hdr.break")), error);
-        Assert.Contains("parentEml=" + TraceLog.Quote(Path.Combine(fixture.ProcessDirectory, "mail.eml.break")), error);
-        Assert.Contains("Header From, physical line 1: 999 bytes exceeds the 998-byte limit", error);
-        Assert.Contains("child=\"mail-1\" status=\"UNATTEMPTED\" recipient=\"alice@example.net\"", error);
-        Assert.Contains("childHdr=" + TraceLog.Quote(Path.Combine(fixture.ProcessDirectory, "mail-1.hdr.pend")), error);
-        Assert.Contains("childEml=" + TraceLog.Quote(Path.Combine(fixture.ProcessDirectory, "mail-1.eml.pend")), error);
-        Assert.Contains("child=\"mail-2\" status=\"UNATTEMPTED\" recipient=\"bob@example.net\" childHdr=\"NOT_CREATED\" childEml=\"NOT_CREATED\"", error);
+        Assert.Contains("source=" + ConsoleErrors.QuoteForDisplay(Path.Combine(fixture.ProcessDirectory, "mail.eml.break")), error);
+        Assert.Contains("destination=" + ConsoleErrors.QuoteForDisplay(Path.Combine(fixture.ProcessDirectory, "mailc2.eml.process")), error);
+        Assert.Contains("parentHdr=" + ConsoleErrors.QuoteForDisplay(Path.Combine(fixture.ProcessDirectory, "mail.hdr.break")), error);
+        Assert.Contains("parentEml=" + ConsoleErrors.QuoteForDisplay(Path.Combine(fixture.ProcessDirectory, "mail.eml.break")), error);
+        Assert.Contains("Header From, physical line 1: 999 bytes exceeds the 998-byte limit", stderr);
+        Assert.Contains(Environment.NewLine + "   at ", stderr);
+        Assert.Contains("child=\"mailc1\" status=\"UNATTEMPTED\" recipient=\"alice@example.net\"", error);
+        Assert.Contains("childHdr=" + ConsoleErrors.QuoteForDisplay(Path.Combine(fixture.ProcessDirectory, "mailc1.hdr.pend")), error);
+        Assert.Contains("childEml=" + ConsoleErrors.QuoteForDisplay(Path.Combine(fixture.ProcessDirectory, "mailc1.eml.pend")), error);
+        Assert.Contains("child=\"mailc2\" status=\"UNATTEMPTED\" recipient=\"bob@example.net\" childHdr=\"NOT_CREATED\" childEml=\"NOT_CREATED\"", error);
         Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail.hdr.break")));
         Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail.eml.break")));
-        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-1.hdr.pend")));
-        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-1.eml.pend")));
-        Assert.False(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-2.eml.process")));
+        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc1.hdr.pend")));
+        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc1.eml.pend")));
+        Assert.False(File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc2.eml.process")));
         Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
     }
 
-    // Arbitrary exception text remains escaped within one stderr line alongside the retained-state details.
+    // Stderr renders exception line breaks while the retained diagnostic escapes its reason and exception once.
     [Fact]
-    public void FailureStateStandardErrorEscapesExceptionControls()
+    public void FailureStateStandardErrorShowsExceptionLinesWhileFileEscapesControls()
     {
         using var fixture = new ProcessorFixture();
         fixture.WriteMessage("mail");
         using var harness = fixture.Open();
-        harness.Processor.ObserveCheckpoint = _ => throw new IOException("Synthetic \"failure\"\r\nforged=entry\tvalue");
+        var failure = new IOException("Synthetic \"failure\"\r\nforged=entry\tvalue");
+        harness.Processor.ObserveCheckpoint = _ => throw failure;
 
         Assert.Equal(MessageOutcome.Failed, harness.Processor.Process("mail"));
-        var error = Assert.Single(fixture.Errors.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
-        Assert.Contains("basename=\"mail\"", error);
-        Assert.Contains("forged=entry", error);
-        Assert.DoesNotContain('\r', error);
-        Assert.DoesNotContain('\n', error);
-        Assert.DoesNotContain('\t', error);
+        string error = fixture.Errors.ToString();
+        string[] consoleLines = error.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+        Assert.Contains("basename=\"mail\"", consoleLines[0]);
+        Assert.Contains(failure.ToString(), error);
+        Assert.Contains("Synthetic \"failure\"\r\nforged=entry\tvalue", error);
+        Assert.Contains(Environment.NewLine + "   at ", error);
+        string diagnostic = File.ReadAllText(Path.Combine(fixture.ProcessDirectory, "mail.err"));
+        Assert.StartsWith("Synthetic \"failure\"\\r\\nforged=entry\\tvalue\r\n", diagnostic);
+        string exceptionLine = Assert.Single(diagnostic.Split("\r\n", StringSplitOptions.RemoveEmptyEntries),
+            line => line.StartsWith("exception=", StringComparison.Ordinal));
+        Assert.Equal("exception=" + TraceLog.Quote(failure.ToString()), exceptionLine);
+        Assert.DoesNotContain('\r', exceptionLine);
+        Assert.DoesNotContain('\n', exceptionLine);
+        Assert.DoesNotContain('\t', exceptionLine);
         Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
     }
 
@@ -174,20 +185,20 @@ public sealed class TaggerFailureTests
         using var fixture = new ProcessorFixture();
         fixture.WriteMessage("mail", ProcessorFixture.Header("alice@example.net,bob@example.net,carol@example.net"),
             ProcessorFixture.Message(extra: "Reply-To: deliberate@example.org\r\n"));
-        var collision = Path.Combine(fixture.SpoolDirectory, failEml ? "mail-2.eml" : "mail-2.hdr");
+        var collision = Path.Combine(fixture.SpoolDirectory, failEml ? "mailc2.eml" : "mailc2.hdr");
         File.WriteAllText(collision, "foreign destination");
         using var harness = fixture.Open(log: true);
         Assert.Equal(MessageOutcome.Failed, harness.Processor.Process("mail"));
         Assert.Equal("foreign destination", File.ReadAllText(collision));
-        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "mail-1.hdr")));
-        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "mail-1.eml")));
+        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "mailc1.hdr")));
+        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "mailc1.eml")));
         Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail.hdr.break")));
         Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail.eml.break")));
-        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-2.hdr.pend")));
-        Assert.Equal(failEml, File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-2.eml.pend")));
-        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-3.hdr.pend")));
-        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-3.eml.pend")));
-        Assert.False(File.Exists(Path.Combine(fixture.SpoolDirectory, "mail-3.hdr")));
+        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc2.hdr.pend")));
+        Assert.Equal(failEml, File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc2.eml.pend")));
+        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc3.hdr.pend")));
+        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc3.eml.pend")));
+        Assert.False(File.Exists(Path.Combine(fixture.SpoolDirectory, "mailc3.hdr")));
         var diagnostic = File.ReadAllText(Path.Combine(fixture.ProcessDirectory, "mail.err"));
         Assert.Contains("PUBLISHED", diagnostic);
         Assert.Contains(failEml ? "EML_MOVE_FAILED" : "HDR_MOVE_FAILED_EML_IN_SPOOL", diagnostic);
@@ -196,7 +207,7 @@ public sealed class TaggerFailureTests
         Assert.Equal("", File.ReadAllText(Path.Combine(third.DirectoryPath, "tag-log.txt")));
         using var restarted = fixture.Open();
         restarted.Processor.ReportResiduals();
-        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-3.hdr.pend")));
+        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc3.hdr.pend")));
     }
 
     // All requested output evidence must complete before any child is published.
@@ -207,14 +218,14 @@ public sealed class TaggerFailureTests
     {
         using var fixture = new ProcessorFixture();
         fixture.WriteMessage("mail", ProcessorFixture.Header("alice@example.net,bob@example.net"));
-        var child = "mail-" + childOrdinal;
+        var child = "mailc" + childOrdinal;
         File.WriteAllText(Path.Combine(fixture.ProcessDirectory, child + ".hdr.out"), "existing evidence");
         using var harness = fixture.Open(keep: true);
         Assert.Equal(MessageOutcome.Failed, harness.Processor.Process("mail"));
         Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
         Assert.Equal(4, Directory.GetFiles(fixture.ProcessDirectory, "*.pend").Length);
         Assert.Equal("existing evidence", File.ReadAllText(Path.Combine(fixture.ProcessDirectory, child + ".hdr.out")));
-        Assert.Contains("activeChild=" + TraceLog.Quote(child), fixture.Errors.ToString());
+        Assert.Contains("activeChild=" + ConsoleErrors.QuoteForDisplay(child), fixture.Errors.ToString());
         Assert.Contains("activeChild=" + TraceLog.Quote(child), File.ReadAllText(Path.Combine(fixture.ProcessDirectory, "mail.err")));
         Assert.All(harness.Tags.Mappings.Values,
             mapping => Assert.Equal("", File.ReadAllText(Path.Combine(mapping.DirectoryPath, "tag-log.txt"))));
@@ -222,8 +233,8 @@ public sealed class TaggerFailureTests
 
     // A child construction collision retains earlier ready files and the current partial pair.
     [Theory]
-    [InlineData("mail-2.hdr.process")]
-    [InlineData("mail-2.eml.pend")]
+    [InlineData("mailc2.hdr.process")]
+    [InlineData("mailc2.eml.pend")]
     public void ConstructionOrReadinessCollisionPublishesNothing(string artifact)
     {
         using var fixture = new ProcessorFixture();
@@ -232,9 +243,9 @@ public sealed class TaggerFailureTests
         using var harness = fixture.Open();
         Assert.Equal(MessageOutcome.Failed, harness.Processor.Process("mail"));
         Assert.Equal("existing artifact", File.ReadAllText(Path.Combine(fixture.ProcessDirectory, artifact)));
-        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-1.hdr.pend")));
-        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-1.eml.pend")));
-        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-2.eml.process")));
+        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc1.hdr.pend")));
+        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc1.eml.pend")));
+        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc2.eml.process")));
         Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
     }
 
@@ -249,7 +260,7 @@ public sealed class TaggerFailureTests
         using var fixture = new ProcessorFixture();
         var original = fixture.WriteMessage("mail");
         using var harness = fixture.Open();
-        var failedPath = Path.Combine(fixture.ProcessDirectory, header ? "mail-1.hdr.process" : "mail-1.eml.process");
+        var failedPath = Path.Combine(fixture.ProcessDirectory, header ? "mailc1.hdr.process" : "mailc1.eml.process");
         FailingChildStream? failedStream = null;
         harness.Processor.OpenChildFileForTesting = path =>
         {
@@ -264,16 +275,16 @@ public sealed class TaggerFailureTests
         Assert.Equal(original.Hdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "mail.hdr.break")));
         Assert.Equal(original.Eml, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "mail.eml.break")));
         Assert.Equal(header ? 2 : 1, Directory.GetFiles(fixture.ProcessDirectory, "*.process").Length);
-        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-1.eml.process")));
-        Assert.Equal(header, File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-1.hdr.process")));
+        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc1.eml.process")));
+        Assert.Equal(header, File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc1.hdr.process")));
         Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory, "*.pend"));
         Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
-        Assert.Contains("destination=" + TraceLog.Quote(failedPath), fixture.Errors.ToString());
+        Assert.Contains("destination=" + ConsoleErrors.QuoteForDisplay(failedPath), fixture.Errors.ToString());
 
         harness.Processor.OpenChildFileForTesting = null;
         fixture.WriteMessage("fresh");
         Assert.Equal(MessageOutcome.Succeeded, harness.Processor.Process("fresh"));
-        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "fresh-1.hdr")));
+        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "freshc1.hdr")));
         Assert.Equal(retainedBytes, File.ReadAllBytes(failedPath));
         Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail.hdr.break")));
     }
@@ -297,12 +308,12 @@ public sealed class TaggerFailureTests
         try
         {
             Assert.Equal(MessageOutcome.Failed, harness.Processor.Process("mail"));
-            Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "mail-1.hdr")));
+            Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "mailc1.hdr")));
             Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail.hdr.break")));
             Assert.False(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail.eml.break")));
             Assert.Contains("PUBLISHED", File.ReadAllText(Path.Combine(fixture.ProcessDirectory, "mail.err")));
             Assert.Contains("parentEml=\"ABSENT\"", fixture.Errors.ToString());
-            Assert.Contains("parentHdr=" + TraceLog.Quote(Path.Combine(fixture.ProcessDirectory, "mail.hdr.break")),
+            Assert.Contains("parentHdr=" + ConsoleErrors.QuoteForDisplay(Path.Combine(fixture.ProcessDirectory, "mail.hdr.break")),
                 fixture.Errors.ToString());
         }
         finally
@@ -363,7 +374,7 @@ public sealed class TaggerFailureTests
         fixture.WriteMessage("mail");
         using var harness = fixture.Open(log: true);
         Assert.Equal(MessageOutcome.Succeeded, harness.Processor.Process("mail"));
-        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "mail-1.hdr")));
+        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "mailc1.hdr")));
         Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory));
         Assert.Contains("ERROR logging to", fixture.Errors.ToString());
     }

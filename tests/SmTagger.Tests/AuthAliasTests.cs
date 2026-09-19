@@ -62,7 +62,7 @@ public sealed class AuthAliasTests
         Assert.Equal(MessageOutcome.Succeeded, restarted.Processor.Process("current"));
         Assert.Equal(tag, Assert.Single(restarted.Tags.Mappings).Value.TagAddress);
         Assert.Contains($"From: \"Fixture Sender\" <{tag}>\r\n",
-            File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "current-1.eml")));
+            File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "currentc1.eml")));
         Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory));
         Assert.Empty(fixture.Errors.ToString());
     }
@@ -83,8 +83,8 @@ public sealed class AuthAliasTests
         for (int index = 0; index < addresses.Length; index++)
         {
             string tag = harness.Tags.Mappings[(ProcessorFixture.SenderId, addresses[index] + ";")].TagAddress;
-            byte[] hdr = File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, $"{basename}-{index + 1}.hdr"));
-            string eml = File.ReadAllText(Path.Combine(fixture.SpoolDirectory, $"{basename}-{index + 1}.eml"));
+            byte[] hdr = File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, $"{basename}c{index + 1}.hdr"));
+            string eml = File.ReadAllText(Path.Combine(fixture.SpoolDirectory, $"{basename}c{index + 1}.eml"));
             Assert.Contains("\r\nauth: " + auth + "\r\n", Encoding.ASCII.GetString(hdr));
             Assert.Contains($"From: \"Fixture Sender\" <{tag}>\r\n", eml);
             if (addresses.Length > 1)

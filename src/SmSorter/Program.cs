@@ -28,10 +28,13 @@ public static class Program
 
             string inputDirectory = Path.Combine(invocation.SpoolDirectory, "proc");
             using SingletonLock singleton = SingletonLock.Acquire(Path.Combine(inputDirectory, "sm-sorter.lock"));
-            using SorterDiagnostics diagnostics = SorterDiagnostics.Open(invocation.SorterLogPath, invocation.Verbose);
+            using SorterDiagnostics diagnostics = SorterDiagnostics.Open(invocation.LogPath, invocation.Verbose);
             diagnostics.Debug("-", "STARTUP", ("datadir", invocation.DataDirectory), ("spooldir", invocation.SpoolDirectory),
-                ("mode", invocation.IsWatchMode ? "watch" : "one-shot"), ("logfile", invocation.SorterLogPath));
-            SorterProcessor processor = new(invocation.DataDirectory, invocation.SpoolDirectory, diagnostics: diagnostics);
+                ("mode", invocation.IsWatchMode ? "watch" : "one-shot"), ("logfile", invocation.LogPath));
+            var concise = new ConciseOutput(invocation.Concise);
+            concise.Welcome("sm-sorter", invocation);
+            SorterProcessor processor = new(invocation.DataDirectory, invocation.SpoolDirectory,
+                diagnostics: diagnostics, concise: concise);
             try
             {
                 int exitCode = Run(invocation, inputDirectory, processor, diagnostics);

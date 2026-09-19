@@ -14,9 +14,8 @@ public sealed class InvocationTests
         Invocation result = Invocation.ParseSorter(["data", "spool", basename]);
         Assert.Equal(basename, result.Basename);
         Assert.False(result.IsWatchMode);
-        Assert.False(result.Log);
         Assert.False(result.Keep);
-        Assert.Null(result.SorterLogPath);
+        Assert.Null(result.LogPath);
         Assert.False(result.Verbose);
         Assert.True(Path.IsPathFullyQualified(result.DataDirectory));
         Assert.True(Path.IsPathFullyQualified(result.SpoolDirectory));
@@ -35,11 +34,10 @@ public sealed class InvocationTests
 
         Invocation result = Invocation.ParseSorter(arguments);
 
-        Assert.Equal(Path.GetFullPath(logfile), result.SorterLogPath);
+        Assert.Equal(Path.GetFullPath(logfile), result.LogPath);
         Assert.True(result.Verbose);
         Assert.Equal(Path.GetFullPath("spool"), result.SpoolDirectory);
         Assert.Equal("message", result.Basename);
-        Assert.False(result.Log);
         Assert.False(result.Keep);
     }
 
@@ -48,19 +46,19 @@ public sealed class InvocationTests
     public void SorterDiagnosticFlagsAreIndependentAndStopAtSpoolDirectory()
     {
         Invocation fileOnly = Invocation.ParseSorter(["data", "-l", "sorter.log", "spool", "-v"]);
-        Assert.Equal(Path.GetFullPath("sorter.log"), fileOnly.SorterLogPath);
+        Assert.Equal(Path.GetFullPath("sorter.log"), fileOnly.LogPath);
         Assert.False(fileOnly.Verbose);
         Assert.Equal("-v", fileOnly.Basename);
 
         Invocation verboseOnly = Invocation.ParseSorter(["data", "-v", "spool", "-l"]);
-        Assert.Null(verboseOnly.SorterLogPath);
+        Assert.Null(verboseOnly.LogPath);
         Assert.True(verboseOnly.Verbose);
         Assert.Equal("-l", verboseOnly.Basename);
 
         Invocation watcher = Invocation.ParseSorter(["data", "-v", "-l", "sorter.log", "spool"]);
         Assert.True(watcher.IsWatchMode);
         Assert.True(watcher.Verbose);
-        Assert.Equal(Path.GetFullPath("sorter.log"), watcher.SorterLogPath);
+        Assert.Equal(Path.GetFullPath("sorter.log"), watcher.LogPath);
     }
 
     // Reject missing operands, repeated sorter options, and options misplaced after the spool argument.
@@ -84,16 +82,82 @@ public sealed class InvocationTests
         Assert.All(invalidArguments, arguments => Assert.Throws<ArgumentException>(() => Invocation.ParseSorter(arguments)));
     }
 
-    // Recognize only flags before spooldir and leave later hyphens as literal message names.
-    [Fact]
-    public void TaggerParsesFlagsOnlyBeforeSpoolDirectory()
+    // Every supported option ordering keeps paths explicit and preserves the later flag-shaped basename.
+    [Theory]
+    [InlineData("keep-log-verbose")]
+    [InlineData("keep-verbose-log")]
+    [InlineData("log-keep-verbose")]
+    [InlineData("log-verbose-keep")]
+    [InlineData("verbose-keep-log")]
+    [InlineData("verbose-log-keep")]
+    public void TaggerParsesAllFlagOrdersOnlyBeforeSpoolDirectory(string order)
     {
-        Invocation result = Invocation.ParseTagger(["data", "-keep", "-log", "spool", "-keep"]);
-        Assert.True(result.Log);
+        var arguments = new List<string> { "data" };
+        foreach (string option in order.Split('-'))
+        {
+            arguments.AddRange(option switch
+            {
+                "keep" => ["-keep"],
+                "log" => ["-l", "tagger trace.txt"],
+                _ => new[] { "-v" }
+            });
+        }
+        arguments.AddRange(["spool", "-keep"]);
+
+        Invocation result = Invocation.ParseTagger(arguments.ToArray());
+
         Assert.True(result.Keep);
         Assert.Equal("-keep", result.Basename);
-        Assert.Null(result.SorterLogPath);
-        Assert.False(result.Verbose);
+        Assert.Equal(Path.GetFullPath("tagger trace.txt"), result.LogPath);
+        Assert.True(result.Verbose);
+    }
+
+    // File logging and verbosity remain independent, and old flag spelling is a valid final basename.
+    [Fact]
+    public void TaggerDiagnosticFlagsAreIndependentAndStopAtSpoolDirectory()
+    {
+        string absolutePath = Path.Combine(Path.GetTempPath(), "tagger trace.txt");
+        Invocation fileOnly = Invocation.ParseTagger(["data", "-l", absolutePath, "spool", "-v"]);
+        Assert.Equal(absolutePath, fileOnly.LogPath);
+        Assert.False(fileOnly.Verbose);
+        Assert.Equal("-v", fileOnly.Basename);
+
+        Invocation verboseOnly = Invocation.ParseTagger(["data", "-v", "spool", "-l"]);
+        Assert.Null(verboseOnly.LogPath);
+        Assert.True(verboseOnly.Verbose);
+        Assert.Equal("-l", verboseOnly.Basename);
+
+        Invocation oldFlagBasename = Invocation.ParseTagger(["data", "spool", "-log"]);
+        Assert.Equal("-log", oldFlagBasename.Basename);
+        Assert.Null(oldFlagBasename.LogPath);
+        Assert.False(oldFlagBasename.Verbose);
+        Assert.False(oldFlagBasename.Keep);
+    }
+
+    // Reject ambiguous option operands, repeated switches, and obsolete trace syntax before touching queues.
+    [Fact]
+    public void InvalidTaggerDiagnosticOptionsFailInvocation()
+    {
+        string[][] invalidArguments =
+        [
+            ["data", "-l"],
+            ["data", "-l", "tagger.log"],
+            ["data", "-l", "-v", "spool"],
+            ["data", "-l", "-keep", "spool"],
+            ["data", "-l", "-log", "spool"],
+            ["data", "-v"],
+            ["data", "-keep", "-v", "-l"],
+            ["data", "-l", "", "spool"],
+            ["data", "-v", "-v", "spool"],
+            ["data", "-keep", "-keep", "spool"],
+            ["data", "-l", "first.log", "-l", "second.log", "spool"],
+            ["data", "spool", "-l", "tagger.log"],
+            ["data", "-log", "spool"],
+            ["data", "-log", "spool", "message"],
+            ["data", "-v", "-log", "spool"]
+        ];
+
+        Assert.All(invalidArguments, arguments => Assert.Throws<ArgumentException>(() => Invocation.ParseTagger(arguments)));
     }
 
     // Omitting the optional basename selects the long-running discovery mode.
@@ -101,7 +165,7 @@ public sealed class InvocationTests
     public void BothInvocationsSupportWatchMode()
     {
         Assert.True(Invocation.ParseSorter(["data", "spool"]).IsWatchMode);
-        Assert.True(Invocation.ParseTagger(["data", "-log", "spool"]).IsWatchMode);
+        Assert.True(Invocation.ParseTagger(["data", "-l", "tagger.log", "-v", "spool"]).IsWatchMode);
     }
 
     // Reject paths and unusable Windows components before any queue files can be touched.

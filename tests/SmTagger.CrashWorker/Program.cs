@@ -20,7 +20,7 @@ public static class Program
             using var singleton = SingletonLock.Acquire(Path.Combine(dataDirectory, "sm-tagger.lock"));
             Directory.CreateDirectory(MailQueuePaths.WorkDirectory(spoolDirectory));
             using var queueSingleton = SingletonLock.Acquire(MailQueuePaths.TaggerLockPath(spoolDirectory));
-            using var trace = TraceLog.Open(dataDirectory, false);
+            using var trace = TraceLog.Open(null);
             SenderConfiguration configuration = SenderConfiguration.Load(dataDirectory, trace);
             byte proposal = 0;
             TagStore tags = TagStore.Load(dataDirectory, configuration, trace, randomBytes: bytes =>

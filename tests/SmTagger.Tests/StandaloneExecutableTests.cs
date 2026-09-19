@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
+using SmTagger.Shared;
 
 namespace SmTagger.Tests;
 
@@ -17,7 +19,12 @@ public sealed class StandaloneExecutableTests
     [InlineData("sm-tagger", "empty")]
     [InlineData("sm-tagger", "datadir-only")]
     [InlineData("sm-tagger", "too-many")]
+    [InlineData("sm-tagger", "log-without-path")]
     [InlineData("sm-tagger", "log-without-spool")]
+    [InlineData("sm-tagger", "verbose-without-spool")]
+    [InlineData("sm-tagger", "obsolete-log")]
+    [InlineData("sm-tagger", "duplicate-verbose")]
+    [InlineData("sm-tagger", "duplicate-log")]
     [InlineData("sm-tagger", "keep-without-spool")]
     [InlineData("sm-tagger", "both-flags-without-spool")]
     public async Task InvalidArgumentCountsShowHintsWithoutTouchingQueues(string application, string scenario)
@@ -36,9 +43,14 @@ public sealed class StandaloneExecutableTests
             "sorter-log-without-path" => [fixture.DataDirectory, "-l"],
             "sorter-log-without-spool" => [fixture.DataDirectory, "-l", Path.Combine(fixture.DataDirectory, "sorter.log")],
             "sorter-verbose-without-spool" => [fixture.DataDirectory, "-v"],
-            "log-without-spool" => [fixture.DataDirectory, "-log"],
+            "log-without-path" => [fixture.DataDirectory, "-l"],
+            "log-without-spool" => [fixture.DataDirectory, "-l", Path.Combine(fixture.Root, "tagger.log")],
+            "verbose-without-spool" => [fixture.DataDirectory, "-v"],
+            "obsolete-log" => [fixture.DataDirectory, "-log", fixture.SpoolDirectory, "process-ready"],
+            "duplicate-verbose" => [fixture.DataDirectory, "-v", "-v", fixture.SpoolDirectory],
+            "duplicate-log" => [fixture.DataDirectory, "-l", "first.log", "-l", "second.log", fixture.SpoolDirectory],
             "keep-without-spool" => [fixture.DataDirectory, "-keep"],
-            "both-flags-without-spool" => [fixture.DataDirectory, "-log", "-keep"],
+            "both-flags-without-spool" => [fixture.DataDirectory, "-l", Path.Combine(fixture.Root, "tagger.log"), "-v", "-keep"],
             _ => throw new ArgumentOutOfRangeException(nameof(scenario))
         };
 
@@ -62,7 +74,8 @@ public sealed class StandaloneExecutableTests
         if (application == "sm-tagger")
         {
             Assert.Contains("process", result.Error, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("-log", result.Error);
+            Assert.Contains("[-l <logfile>]", result.Error);
+            Assert.Contains("[-v]", result.Error);
             Assert.Contains("-keep", result.Error);
             Assert.Contains("execution trace", result.Error, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("original and output copies", result.Error, StringComparison.OrdinalIgnoreCase);
@@ -290,7 +303,7 @@ public sealed class StandaloneExecutableTests
         for (int index = 0; index < recipients.Length; index++)
         {
             string individual = loaded.Tags.Mappings[(ProcessorFixture.SenderId, recipients[index] + ";")].TagAddress;
-            string basename = "-standalone-" + (index + 1);
+            string basename = "-standalonec" + (index + 1);
             Assert.Equal(Encoding.ASCII.GetBytes(ProcessorFixture.Header(recipients[index], individual)),
                 File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, basename + ".hdr")));
             string expectedHeaders = ProcessorFixture.Message()
@@ -308,6 +321,258 @@ public sealed class StandaloneExecutableTests
             Directory.GetFiles(binaryDirectory).Select(Path.GetFileName).Order(StringComparer.Ordinal));
     }
 
+    // Both standalone programs support descriptive sender keys while separate tagger processes reuse one alias-shared tag.
+    [StandaloneTheory]
+    [InlineData("Sales Team Émail")]
+    [InlineData(ProcessorFixture.SenderId)]
+    public async Task StandaloneExecutablesReuseSenderIdAcrossAliasesAndRestarts(string senderId)
+    {
+        using var fixture = new ProcessorFixture();
+        string binaryDirectory = CopyExecutables(fixture, "sm-sorter", "sm-tagger");
+        if (senderId != ProcessorFixture.SenderId)
+            Directory.Move(fixture.ProfileDirectory, Path.Combine(fixture.DataDirectory, "senders", "sender-ids", senderId));
+        string aliasDirectory = Path.Combine(fixture.DataDirectory, "senders", "auth-addresses", "alias@example.com");
+        Directory.CreateDirectory(aliasDirectory);
+        File.WriteAllText(Path.Combine(aliasDirectory, "sender-id.txt"), senderId, new UTF8Encoding(false));
+        File.WriteAllText(Path.Combine(fixture.DataDirectory, "senders", "auth-addresses", ProcessorFixture.Auth, "sender-id.txt"),
+            senderId, new UTF8Encoding(false));
+        byte[] body = [0, 255, 13, 10, .. Encoding.ASCII.GetBytes("Unchanged synthetic body.")];
+        string? originalTag = null;
+        string[] auths = [ProcessorFixture.Auth, "alias@example.com"];
+        for (int index = 0; index < auths.Length; index++)
+        {
+            string basename = "sender-key-" + index;
+            var original = fixture.WriteMessage(basename, ProcessorFixture.Header(auth: auths[index]), body: body);
+            MoveToSorter(fixture, basename);
+            var sorter = await RunAsync(binaryDirectory, "sm-sorter", fixture,
+                [fixture.DataDirectory, fixture.SpoolDirectory, basename]);
+            Assert.True(sorter.ExitCode == 0, sorter.Error);
+            Assert.Empty(sorter.Error);
+            Assert.Equal(original.Hdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, basename + ".hdr")));
+            Assert.Equal(original.Eml, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, basename + ".eml")));
+
+            var tagger = await RunAsync(binaryDirectory, "sm-tagger", fixture,
+                [fixture.DataDirectory, fixture.SpoolDirectory, basename]);
+            Assert.True(tagger.ExitCode == 0, tagger.Error);
+            Assert.Empty(tagger.Error);
+            Assert.Empty(tagger.Output);
+            string mappingDirectory = Assert.Single(Directory.GetDirectories(Path.Combine(fixture.DataDirectory, "tag-addresses")));
+            string tag = Path.GetFileName(mappingDirectory);
+            originalTag ??= tag;
+            Assert.Equal(originalTag, tag);
+            Assert.Equal(Encoding.UTF8.GetBytes(senderId), File.ReadAllBytes(Path.Combine(mappingDirectory, "sender-id.txt")));
+            Assert.Equal("alice@example.net;"u8.ToArray(), File.ReadAllBytes(Path.Combine(mappingDirectory, "recipient-id.txt")));
+            Assert.Equal(Encoding.ASCII.GetBytes(ProcessorFixture.Header(sender: tag, auth: auths[index])),
+                File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, basename + "c1.hdr")));
+            string expectedHeaders = ProcessorFixture.Message()
+                .Replace("Return-Path: <private@example.com>\r\n", "", StringComparison.Ordinal)
+                .Replace("From: \"Fixture Sender\" <private@example.com>\r\n",
+                    $"From: \"Fixture Sender\" <{tag}>\r\n", StringComparison.Ordinal);
+            Assert.Equal([.. Encoding.ASCII.GetBytes(expectedHeaders), .. body],
+                File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, basename + "c1.eml")));
+            Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory));
+        }
+    }
+
+    // Equal auth/private identities still tag sender fields, preserve auth metadata, and ignore auth-only matches.
+    [StandaloneFact]
+    public async Task StandaloneExecutablesAllowSameSenderAuthAndPrivateAddress()
+    {
+        using var fixture = new ProcessorFixture();
+        string binaryDirectory = CopyExecutables(fixture, "sm-sorter", "sm-tagger");
+        fixture.WriteProfile("private-address.txt", "AUTH@EXAMPLE.COM");
+        byte[] body = [0, 255, .. Encoding.ASCII.GetBytes("Synthetic unchanged body.\r\n")];
+        string headers = ProcessorFixture.Message().Replace(ProcessorFixture.Private, ProcessorFixture.Auth, StringComparison.Ordinal);
+        fixture.WriteMessage("same-identity", ProcessorFixture.Header(sender: ProcessorFixture.Auth), headers, body);
+        MoveToSorter(fixture, "same-identity");
+
+        var sorter = await RunAsync(binaryDirectory, "sm-sorter", fixture,
+            [fixture.DataDirectory, fixture.SpoolDirectory, "same-identity"]);
+        Assert.True(sorter.ExitCode == 0, sorter.Error);
+        var tagger = await RunAsync(binaryDirectory, "sm-tagger", fixture,
+            [fixture.DataDirectory, fixture.SpoolDirectory, "same-identity"]);
+        Assert.True(tagger.ExitCode == 0, tagger.Error);
+        Assert.Empty(tagger.Error);
+        string mapping = Assert.Single(Directory.GetDirectories(Path.Combine(fixture.DataDirectory, "tag-addresses")));
+        string tag = Path.GetFileName(mapping);
+        Assert.Equal(Encoding.ASCII.GetBytes(ProcessorFixture.Header(sender: tag)),
+            File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "same-identityc1.hdr")));
+        string taggedHeaders = headers.Replace("Return-Path: <auth@example.com>\r\n", "", StringComparison.Ordinal)
+            .Replace("From: \"Fixture Sender\" <auth@example.com>\r\n",
+                $"From: \"Fixture Sender\" <{tag}>\r\n", StringComparison.Ordinal);
+        Assert.Equal([.. Encoding.ASCII.GetBytes(taggedHeaders), .. body],
+            File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "same-identityc1.eml")));
+
+        var unchanged = fixture.WriteMessage("auth-only", body: body);
+        MoveToSorter(fixture, "auth-only");
+        var passSorter = await RunAsync(binaryDirectory, "sm-sorter", fixture,
+            [fixture.DataDirectory, fixture.SpoolDirectory, "auth-only"]);
+        Assert.True(passSorter.ExitCode == 0, passSorter.Error);
+        var passTagger = await RunAsync(binaryDirectory, "sm-tagger", fixture,
+            [fixture.DataDirectory, fixture.SpoolDirectory, "auth-only"]);
+        Assert.True(passTagger.ExitCode == 0, passTagger.Error);
+        Assert.Empty(passTagger.Error);
+        Assert.Equal(unchanged.Hdr, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "auth-only.hdr")));
+        Assert.Equal(unchanged.Eml, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "auth-only.eml")));
+        Assert.Single(Directory.GetDirectories(Path.Combine(fixture.DataDirectory, "tag-addresses")));
+        Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory));
+    }
+
+    // Startup failures render real stack lines on the console while the selected trace retains one line per event.
+    [StandaloneFact]
+    public async Task StandaloneTaggerPrintsReadableExceptionsWithoutDoubleEscapingFileTrace()
+    {
+        using var fixture = new ProcessorFixture();
+        string binaryDirectory = CopyExecutables(fixture, "sm-tagger");
+        var original = fixture.WriteMessage("queued");
+        fixture.WriteProfile("allow-mdn.txt", "invalid-policy");
+        string logPath = Path.Combine(fixture.Root, "fatal-trace.txt");
+
+        var result = await RunAsync(binaryDirectory, "sm-tagger", fixture,
+            [fixture.DataDirectory, "-l", logPath, "-v", fixture.SpoolDirectory, "queued"]);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("\n   at ", result.Error);
+        Assert.Contains("\n   at ", result.Output);
+        Assert.DoesNotContain("\\r\\n", result.Error);
+        Assert.DoesNotContain("\\r\\n", result.Output);
+        Assert.Contains(fixture.ProfileDirectory, result.Error);
+        Assert.Contains(fixture.ProfileDirectory, result.Output);
+        string fatal = Assert.Single(File.ReadAllLines(logPath), line => line.Contains("event=FATAL", StringComparison.Ordinal));
+        Assert.Contains("\\r\\n   at ", fatal);
+        Assert.DoesNotContain("\\\\r\\\\n", fatal);
+        Assert.DoesNotContain("exception=\"\\\"", fatal);
+        Assert.Equal(original.Hdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "queued.hdr")));
+        Assert.Equal(original.Eml, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "queued.eml")));
+        Assert.Equal(2, Directory.GetFiles(fixture.ProcessDirectory).Length);
+        Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
+    }
+
+    // Unsafe persisted references stop the real process before it claims or changes queued mail.
+    [StandaloneTheory]
+    [InlineData("auth")]
+    [InlineData("mapping")]
+    public async Task StandaloneTaggerRejectsUnsafeSenderIdBeforeMessageWork(string source)
+    {
+        using var fixture = new ProcessorFixture();
+        string binaryDirectory = CopyExecutables(fixture, "sm-tagger");
+        var original = fixture.WriteMessage("queued");
+        string identity = source == "mapping"
+            ? Path.Combine(fixture.WriteMapping("tag-11111@reply.example.com", "alice@example.net;"), "sender-id.txt")
+            : Path.Combine(fixture.DataDirectory, "senders", "auth-addresses", ProcessorFixture.Auth, "sender-id.txt");
+        byte[] unsafeIdentity = "..\\outside"u8.ToArray();
+        File.WriteAllBytes(identity, unsafeIdentity);
+
+        var result = await RunAsync(binaryDirectory, "sm-tagger", fixture,
+            [fixture.DataDirectory, fixture.SpoolDirectory, "queued"]);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Empty(result.Output);
+        Assert.Contains("sender", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(unsafeIdentity, File.ReadAllBytes(identity));
+        Assert.Equal(original.Hdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "queued.hdr")));
+        Assert.Equal(original.Eml, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "queued.eml")));
+        Assert.Equal(2, Directory.GetFiles(fixture.ProcessDirectory).Length);
+        Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
+        Assert.False(Directory.Exists(Path.Combine(fixture.DataDirectory, "staging")));
+    }
+
+    // Published diagnostics independently select file/console output without changing retained originals or routing.
+    [StandaloneTheory]
+    [InlineData("none")]
+    [InlineData("file")]
+    [InlineData("verbose")]
+    [InlineData("both")]
+    public async Task StandaloneTaggerHonorsIndependentDiagnosticOptions(string mode)
+    {
+        using var fixture = new ProcessorFixture();
+        string binaryDirectory = CopyExecutables(fixture, "sm-tagger");
+        var originals = fixture.WriteMessage("-log");
+        string relativeLog = "selected tagger trace.txt";
+        string chosenLog = Path.Combine(fixture.Root, relativeLog);
+        bool file = mode is "file" or "both";
+        bool verbose = mode is "verbose" or "both";
+        if (file)
+            File.WriteAllText(chosenLog, "previous history\r\n");
+        string oldDefault = Path.Combine(fixture.DataDirectory, "log.txt");
+        byte[] priorDefault = "old default remains untouched\r\n"u8.ToArray();
+        File.WriteAllBytes(oldDefault, priorDefault);
+        var arguments = new List<string> { fixture.DataDirectory, "-keep" };
+        if (file)
+            arguments.AddRange(["-l", relativeLog]);
+        if (verbose)
+            arguments.Add("-v");
+        arguments.AddRange([fixture.SpoolDirectory, "-log"]);
+
+        var result = await RunAsync(binaryDirectory, "sm-tagger", fixture, arguments.ToArray());
+
+        Assert.True(result.ExitCode == 0, result.Error);
+        Assert.Empty(result.Error);
+        Assert.Equal(priorDefault, File.ReadAllBytes(oldDefault));
+        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "-logc1.hdr")));
+        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "-logc1.eml")));
+        Assert.Equal(originals.Hdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "-log.hdr.in")));
+        Assert.Equal(originals.Eml, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "-log.eml.in")));
+        Assert.Equal(file, File.Exists(chosenLog));
+        if (verbose)
+        {
+            Assert.Contains("DEBUG ", result.Output);
+            Assert.Contains("event=STARTUP", result.Output);
+            Assert.Contains("event=STATE_INTENT", result.Output);
+            Assert.Contains("event=STATE_RESULT", result.Output);
+            Assert.Contains("event=SHUTDOWN", result.Output);
+        }
+        else
+        {
+            Assert.Empty(result.Output);
+        }
+        if (file)
+        {
+            string trace = File.ReadAllText(chosenLog);
+            Assert.StartsWith("previous history\r\n", trace);
+            Assert.Contains("event=STARTUP", trace);
+            Assert.Contains("event=SHUTDOWN", trace);
+            string[] records = trace.Split("\r\n", StringSplitOptions.RemoveEmptyEntries).Skip(1).ToArray();
+            Assert.All(records, record => Assert.DoesNotContain("DEBUG ", record));
+            if (verbose)
+            {
+                string[] consoleRecords = result.Output.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+                Assert.Equal(records.Select(record => Regex.Match(record, @"^.*? result=[A-Z_]+").Value),
+                    consoleRecords.Select(record => Regex.Match(record, @"^DEBUG (.*? result=[A-Z_]+)").Groups[1].Value));
+                Assert.Contains(fixture.DataDirectory, result.Output);
+                Assert.Contains(fixture.SpoolDirectory, result.Output);
+            }
+        }
+    }
+
+    // Both real startup locks gate optional file and console output as well as message ownership.
+    [StandaloneTheory]
+    [InlineData("data")]
+    [InlineData("queue")]
+    public async Task StandaloneTaggerRejectsContentionBeforeOpeningEitherDiagnosticSink(string lockKind)
+    {
+        using var fixture = new ProcessorFixture();
+        string binaryDirectory = CopyExecutables(fixture, "sm-tagger");
+        var original = fixture.WriteMessage("queued");
+        string lockPath = Path.Combine(lockKind == "data" ? fixture.DataDirectory : fixture.WorkDirectory, "sm-tagger.lock");
+        string logPath = Path.Combine(fixture.Root, "chosen trace.txt");
+        byte[] prior = "existing trace bytes\r\n"u8.ToArray();
+        File.WriteAllBytes(logPath, prior);
+        using SingletonLock owner = SingletonLock.Acquire(lockPath);
+
+        var result = await RunAsync(binaryDirectory, "sm-tagger", fixture,
+            [fixture.DataDirectory, "-v", "-l", logPath, fixture.SpoolDirectory, "queued"]);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Empty(result.Output);
+        Assert.Contains("lock", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(prior, File.ReadAllBytes(logPath));
+        Assert.Equal(original.Hdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "queued.hdr")));
+        Assert.Equal(original.Eml, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "queued.eml")));
+        Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
+        Assert.False(Directory.Exists(Path.Combine(fixture.DataDirectory, "tag-addresses")));
+    }
+
     // Checks retained originals on a real contract failure and continued publication when logging cannot open.
     [StandaloneFact]
     public async Task StandaloneTaggerRetainsInvalidFromAndSurvivesLoggingFailure()
@@ -318,11 +583,12 @@ public sealed class StandaloneExecutableTests
         var originals = fixture.WriteMessage("invalid", eml: ProcessorFixture.Message(""));
 
         var invalid = await RunAsync(binaryDirectory, "sm-tagger", fixture,
-            [fixture.DataDirectory, "-log", fixture.SpoolDirectory, "invalid"]);
+            [fixture.DataDirectory, "-l", Path.Combine(fixture.DataDirectory, "log.txt"), "-v", fixture.SpoolDirectory, "invalid"]);
 
         Assert.Equal(1, invalid.ExitCode);
         Assert.Contains("exactly one From", invalid.Error);
         Assert.Contains("ERROR logging to", invalid.Error);
+        Assert.Contains("event=STATE_RESULT", invalid.Output);
         Assert.Equal(originals.Hdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "invalid.hdr.err")));
         Assert.Equal(originals.Eml, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "invalid.eml.err")));
         Assert.Contains("exactly one From", File.ReadAllText(Path.Combine(fixture.ProcessDirectory, "invalid.err")));
@@ -331,12 +597,13 @@ public sealed class StandaloneExecutableTests
 
         fixture.WriteMessage("valid");
         var valid = await RunAsync(binaryDirectory, "sm-tagger", fixture,
-            [fixture.DataDirectory, "-log", fixture.SpoolDirectory, "valid"]);
+            [fixture.DataDirectory, "-l", Path.Combine(fixture.DataDirectory, "log.txt"), "-v", fixture.SpoolDirectory, "valid"]);
 
         Assert.True(valid.ExitCode == 0, valid.Error);
         Assert.Contains("ERROR logging to", valid.Error);
-        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "valid-1.hdr")));
-        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "valid-1.eml")));
+        Assert.Contains("event=SHUTDOWN", valid.Output);
+        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "validc1.hdr")));
+        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "validc1.eml")));
         Assert.False(File.Exists(Path.Combine(fixture.ProcessDirectory, "valid.err")));
     }
 

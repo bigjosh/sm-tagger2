@@ -13,6 +13,7 @@ public sealed class TaggerProcessor
     private readonly TagStore tags;
     private readonly TraceLog trace;
     private readonly bool keep;
+    private readonly ConciseOutput? concise;
 
     // Tests observe phase boundaries without introducing selectable production fault behavior.
     internal Action<ProcessingCheckpoint>? ObserveCheckpoint { get; set; }
@@ -22,7 +23,7 @@ public sealed class TaggerProcessor
 
     // Binds the validated startup snapshot and permanent mapping authority to one queue.
     public TaggerProcessor(string spoolDirectory, SenderConfiguration configuration,
-        TagStore tags, TraceLog trace, bool keep = false)
+        TagStore tags, TraceLog trace, bool keep = false, ConciseOutput? concise = null)
     {
         processDirectory = MailQueuePaths.ProcessDirectory(spoolDirectory);
         this.spoolDirectory = spoolDirectory;
@@ -30,6 +31,7 @@ public sealed class TaggerProcessor
         this.tags = tags;
         this.trace = trace;
         this.keep = keep;
+        this.concise = concise;
     }
 
     // Claims and completes one plain pair, returning a local failure without retrying retained mail.
@@ -51,7 +53,7 @@ public sealed class TaggerProcessor
                 return MessageOutcome.Stale;
             }
 
-            trace.ReportError($"Requested HDR was not found for {ConsoleErrors.Quote(basename)}.", exception);
+            trace.ReportError($"Requested HDR was not found for {ConsoleErrors.QuoteForDisplay(basename)}.", exception);
             return MessageOutcome.Failed;
         }
         catch (Exception exception)
@@ -72,7 +74,8 @@ public sealed class TaggerProcessor
 
             // VERSION-SENSITIVE-007: Upstream admission limits bound resource use; actual read/allocation failures retain owned mail.
             state.SetOperation("parse-hdr", state.HeaderPath, null);
-            var hdr = HdrDocument.Parse(File.ReadAllBytes(state.HeaderPath));
+            state.OriginalHeaderBytes = File.ReadAllBytes(state.HeaderPath);
+            var hdr = HdrDocument.Parse(state.OriginalHeaderBytes);
             state.SetOperation("resolve-profile", state.HeaderPath, null);
             var profile = configuration.Resolve(hdr.AuthAddress);
             state.SetOperation("parse-eml", state.EmlPath, null);
@@ -121,7 +124,8 @@ public sealed class TaggerProcessor
             var recipients = hdr.ParseRecipients();
             for (var index = 0; index < recipients.Count; index++)
             {
-                var childName = basename + "-" + checked(index + 1).ToString(CultureInfo.InvariantCulture);
+                // VERSION-SENSITIVE-003, VERSION-SENSITIVE-015: Keep parent continuity with a hex-compatible child delimiter.
+                var childName = basename + "c" + checked(index + 1).ToString(CultureInfo.InvariantCulture);
                 state.Children.Add(new ChildState(childName, recipients[index]));
             }
 
@@ -187,7 +191,7 @@ public sealed class TaggerProcessor
                 extension.Equals(".pend", StringComparison.OrdinalIgnoreCase) ||
                 extension.Equals(".err", StringComparison.OrdinalIgnoreCase))
             {
-                trace.ReportError($"WARNING retained message evidence: {ConsoleErrors.Quote(path)}");
+                trace.ReportError($"WARNING retained message evidence: {ConsoleErrors.QuoteForDisplay(path)}");
                 trace.Event("-", "RESIDUAL", "WARNING", ("path", path));
             }
         }
@@ -204,6 +208,7 @@ public sealed class TaggerProcessor
 
         MoveParent(state, false, Path.Combine(spoolDirectory, state.Basename + ".eml"));
         MoveParent(state, true, Path.Combine(spoolDirectory, state.Basename + ".hdr"));
+        concise?.Moved(state.Basename, state.OriginalHeaderBytes, "spool");
         trace.Event(state.Basename, "MESSAGE", "SUCCESS", ("branch", "PASS"));
     }
 
@@ -234,7 +239,10 @@ public sealed class TaggerProcessor
     {
         state.ActiveChild = child.Basename;
         state.SetOperation("obtain-individual-tag", null, null);
-        var individual = tags.GetOrCreate(profile, RecipientIdentity.Encode([child.Recipient.CanonicalAddress]), state.Basename);
+        var individual = tags.GetOrCreate(profile, RecipientIdentity.Encode([child.Recipient.CanonicalAddress]),
+            state.Basename, out var created);
+        child.IndividualTag = individual.TagAddress;
+        child.IndividualTagCreated = created;
         child.Mappings.Add(individual);
         if (group is not null)
         {
@@ -284,6 +292,8 @@ public sealed class TaggerProcessor
         }
 
         child.Status = "PUBLISHED";
+        concise?.Moved(child.Basename, state.OriginalHeaderBytes, "spool", child.Recipient.OriginalAddress,
+            child.IndividualTag, child.IndividualTagCreated);
         Checkpoint("CHILD_PUBLISHED", state, child.Basename);
     }
 
@@ -397,8 +407,7 @@ public sealed class TaggerProcessor
             ("basename", state.Basename), ("activeChild", state.ActiveChild),
             ("operation", state.Operation), ("source", state.OperationSource), ("destination", state.OperationDestination),
             ("parentHdr", state.HeaderRemoved ? "ABSENT" : state.HeaderPath),
-            ("parentEml", state.EmlRemoved ? "ABSENT" : state.EmlPath),
-            ("exception", ConsoleErrors.FormatException(exception))
+            ("parentEml", state.EmlRemoved ? "ABSENT" : state.EmlPath)
         };
         foreach (var child in state.Children)
         {
@@ -409,9 +418,10 @@ public sealed class TaggerProcessor
             details.Add(("childEml", child.EmlPath ?? "NOT_CREATED"));
         }
 
-        trace.Event(state.Basename, "MESSAGE", "ERROR", details.ToArray());
         trace.ReportError("Message failed; " + string.Join(" ", details.Select(detail =>
-            detail.Name + "=" + TraceLog.Quote(Convert.ToString(detail.Value, CultureInfo.InvariantCulture) ?? ""))));
+            detail.Name + "=" + ConsoleErrors.QuoteForDisplay(Convert.ToString(detail.Value, CultureInfo.InvariantCulture) ?? ""))), exception);
+        details.Add(("exception", exception));
+        trace.Event(state.Basename, "MESSAGE", "ERROR", details.ToArray());
         trace.WriteDiagnostic(Path.Combine(processDirectory, state.Basename + ".err"), exception.Message, details);
     }
 
@@ -427,6 +437,7 @@ public sealed class TaggerProcessor
         public string Basename { get; } = basename;
         public string HeaderPath { get; set; } = headerPath;
         public string EmlPath { get; set; } = emlPath;
+        public byte[]? OriginalHeaderBytes { get; set; }
         public bool HeaderRemoved { get; set; }
         public bool EmlRemoved { get; set; }
         public List<ChildState> Children { get; } = [];
@@ -452,6 +463,8 @@ public sealed class TaggerProcessor
         public string? HeaderPath { get; set; }
         public string? EmlPath { get; set; }
         public string Status { get; set; } = "UNATTEMPTED";
+        public string? IndividualTag { get; set; }
+        public bool IndividualTagCreated { get; set; }
         public List<TagMapping> Mappings { get; } = [];
     }
 }

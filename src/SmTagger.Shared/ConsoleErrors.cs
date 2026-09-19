@@ -19,7 +19,13 @@ public static class ConsoleErrors
     }
 
     // Keep arbitrary values on one diagnostic line while preserving printable Unicode text.
-    public static string Quote(string value)
+    public static string Quote(string value) => QuoteCore(value, escapeBackslashes: true);
+
+    // Keep console scalar values on one line while leaving literal Windows paths readable.
+    public static string QuoteForDisplay(string value) => QuoteCore(value, escapeBackslashes: false);
+
+    // Encode scalar controls and quotes, with backslash escaping reserved for structured file records.
+    private static string QuoteCore(string value, bool escapeBackslashes)
     {
         StringBuilder result = new(value.Length + 2);
         result.Append('"');
@@ -27,7 +33,7 @@ public static class ConsoleErrors
         {
             switch (character)
             {
-                case '\\': result.Append("\\\\"); break;
+                case '\\' when escapeBackslashes: result.Append("\\\\"); break;
                 case '"': result.Append("\\\""); break;
                 case '\r': result.Append("\\r"); break;
                 case '\n': result.Append("\\n"); break;
@@ -52,10 +58,10 @@ public static class ConsoleErrors
         return result.Append('"').ToString();
     }
 
-    // Include the complete managed exception chain without permitting forged diagnostic lines.
+    // Render the complete managed exception chain with its real line breaks and literal path spelling.
     public static string FormatException(Exception exception)
     {
-        return Quote(exception.ToString());
+        return exception.ToString();
     }
 
     // Protect exception formatting as well as the final standard-error write.

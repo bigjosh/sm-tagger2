@@ -12,9 +12,11 @@ public sealed class SorterProcessor
     private readonly string authAddressesDirectory;
     private readonly TextWriter standardError;
     private readonly SorterDiagnostics? diagnostics;
+    private readonly ConciseOutput? concise;
 
     // Bind trusted queue roots and the auth-address index without reading sender records, mappings, or tagger logs.
-    public SorterProcessor(string dataDir, string spoolDir, TextWriter? stderr = null, SorterDiagnostics? diagnostics = null)
+    public SorterProcessor(string dataDir, string spoolDir, TextWriter? stderr = null, SorterDiagnostics? diagnostics = null,
+        ConciseOutput? concise = null)
     {
         inputDirectory = Path.Combine(spoolDir, "proc");
         spoolDirectory = spoolDir;
@@ -23,6 +25,7 @@ public sealed class SorterProcessor
         authAddressesDirectory = Path.Combine(dataDir, "senders", "auth-addresses");
         standardError = stderr ?? Console.Error;
         this.diagnostics = diagnostics;
+        this.concise = concise;
     }
 
     // Wait for producer readiness, classify only HDR bytes, and publish EML before HDR without rollback.
@@ -39,6 +42,7 @@ public sealed class SorterProcessor
         Exception? holdReason = null;
         bool divert = false;
         string routeReason = "NO_AUTH";
+        byte[]? hdr = null;
 
         try
         {
@@ -60,7 +64,7 @@ public sealed class SorterProcessor
             }
             operation = "read HDR";
             diagnostics?.Debug(basename, "READ_HDR", ("path", sourceHdr));
-            byte[] hdr = File.ReadAllBytes(sourceHdr);
+            hdr = File.ReadAllBytes(sourceHdr);
             int statusEnd = hdr.AsSpan().IndexOf("\r\n"u8);
             // VERSION-SENSITIVE-001: Only Written permits routing; retain the read's exclusion of writers.
             // Unknown or incomplete statuses remain producer-owned; see written-readiness-2026-09-17.md.
@@ -168,7 +172,7 @@ public sealed class SorterProcessor
         if (holdReason is not null)
         {
             if (routeReason == "UPSTREAM_FAILED")
-                return RetainUpstreamFailure(basename, currentHdr, currentEml, holdReason);
+                return RetainUpstreamFailure(basename, currentHdr, currentEml, hdr, holdReason);
 
             diagnostics?.Message(basename, "ERROR", canonicalAuth, routeReason, operation,
                 currentHdr, currentEml, destination, holdReason);
@@ -202,6 +206,7 @@ public sealed class SorterProcessor
             diagnostics?.Debug(basename, "MOVE_OK", ("operation", operation), ("hdr", currentHdr));
             diagnostics?.Message(basename, divert ? "DIVERT" : "PASS", canonicalAuth, routeReason,
                 operation, currentHdr, currentEml, destination);
+            concise?.Moved(basename, hdr, divert ? "process" : "spool", action: divert ? "TAKE" : "PASS");
             return MessageOutcome.Succeeded;
         }
         catch (Exception error)
@@ -215,7 +220,8 @@ public sealed class SorterProcessor
     }
 
     // Preserve upstream-failed bytes outside SmarterMail's queues without publishing, replacing, or rolling back files.
-    private MessageOutcome RetainUpstreamFailure(string basename, string currentHdr, string currentEml, Exception upstreamError)
+    private MessageOutcome RetainUpstreamFailure(string basename, string currentHdr, string currentEml, byte[]? hdr,
+        Exception upstreamError)
     {
         string operation = "create failed retention directory";
         string destination = failedDirectory;
@@ -238,6 +244,7 @@ public sealed class SorterProcessor
             File.Move(currentHdr, destination, overwrite: false);
             currentHdr = destination;
             diagnostics?.Debug(basename, "MOVE_OK", ("operation", operation), ("hdr", currentHdr));
+            concise?.Moved(basename, hdr, "failed", action: "FAIL");
         }
         catch (Exception error)
         {
@@ -316,19 +323,19 @@ public sealed class SorterProcessor
     {
         try
         {
+            string exceptionText = ConsoleErrors.FormatException(error);
             string details = reason + "\r\n"
                 + "basename=" + ConsoleErrors.Quote(basename) + "\r\n"
                 + "operation=" + ConsoleErrors.Quote(operation) + "\r\n"
                 + "HDR=" + ConsoleErrors.Quote(currentHdr) + "\r\n"
                 + "EML=" + ConsoleErrors.Quote(currentEml) + "\r\n"
                 + "destination=" + ConsoleErrors.Quote(destination ?? "-") + "\r\n"
-                + "canonicalAuth=" + ConsoleErrors.Quote(canonicalAuth ?? "-") + "\r\n"
-                + "error=" + ConsoleErrors.FormatException(error) + "\r\n";
-            ConsoleErrors.Write(standardError, details);
+                + "canonicalAuth=" + ConsoleErrors.Quote(canonicalAuth ?? "-") + "\r\n";
+            ConsoleErrors.Write(standardError, details + "error=" + exceptionText + "\r\n");
             string diagnostic = Path.Combine(Path.GetDirectoryName(currentHdr)!, basename + ".sort.err");
             try
             {
-                byte[] bytes = new UTF8Encoding(false, true).GetBytes(details);
+                byte[] bytes = new UTF8Encoding(false, true).GetBytes(details + "error=" + ConsoleErrors.Quote(exceptionText) + "\r\n");
                 using FileStream stream = new(diagnostic, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
                 stream.Write(bytes);
             }

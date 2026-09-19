@@ -22,8 +22,8 @@ public sealed class TaggerProcessorTests
         var first = harness.Tags.Mappings[(ProcessorFixture.SenderId, "alice@example.org;")].TagAddress;
         var second = harness.Tags.Mappings[(ProcessorFixture.SenderId, "bob@example.net;")].TagAddress;
         var group = harness.Tags.Mappings[(ProcessorFixture.SenderId, "alice@example.org;bob@example.net;")].TagAddress;
-        var firstHdr = File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "mail-1.hdr"));
-        var secondHdr = File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "mail-2.hdr"));
+        var firstHdr = File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "mailc1.hdr"));
+        var secondHdr = File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "mailc2.hdr"));
         Assert.Contains($"\r\n{first}\r\nALICE@example.org\r\n", firstHdr);
         Assert.Contains($"\r\n{second}\r\nBob@example.net\r\n", secondHdr);
         Assert.Contains("notify: ALICE@example.org=\r\n", firstHdr);
@@ -33,7 +33,7 @@ public sealed class TaggerProcessorTests
         Assert.Contains("auth: " + ProcessorFixture.Auth, firstHdr);
         for (var ordinal = 1; ordinal <= 2; ordinal++)
         {
-            var output = File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, $"mail-{ordinal}.eml"));
+            var output = File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, $"mailc{ordinal}.eml"));
             var headers = Encoding.ASCII.GetString(output[..^body.Length]);
             Assert.DoesNotContain("Return-Path:", headers);
             Assert.Contains($"Reply-To: \"Fixture Sender\" <{group}>\r\n", headers);
@@ -107,7 +107,7 @@ public sealed class TaggerProcessorTests
         fixture.WriteMessage("mail", eml: ProcessorFixture.Message(from));
         using var harness = fixture.Open();
         Assert.Equal(MessageOutcome.Succeeded, harness.Processor.Process("mail"));
-        Assert.Contains(from, File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "mail-1.eml")));
+        Assert.Contains(from, File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "mailc1.eml")));
     }
 
     // Avoids recipient parsing and activated cardinality checks for syntax-valid no-match pairs.
@@ -173,10 +173,10 @@ public sealed class TaggerProcessorTests
         using var harness = fixture.Open();
         Assert.Equal(MessageOutcome.Succeeded, harness.Processor.Process("mail"));
         string tag = Assert.Single(harness.Tags.Mappings).Value.TagAddress;
-        string eml = File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "mail-1.eml"));
+        string eml = File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "mailc1.eml"));
         Assert.Contains($"From: \"Fixture Sender\" <{tag}>\r\n", eml);
         Assert.Contains("former@example.com", hdrMatch
-            ? File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "mail-1.hdr")) : eml);
+            ? File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "mailc1.hdr")) : eml);
         Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory));
         Assert.Empty(fixture.Errors.ToString());
     }
@@ -244,8 +244,8 @@ public sealed class TaggerProcessorTests
             string expectedEml = location == "Return-Path"
                 ? eml.Replace(identityField, "", StringComparison.Ordinal)
                 : eml.Replace(identity, tag, StringComparison.Ordinal);
-            Assert.Equal(Encoding.ASCII.GetBytes(expectedHdr), File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "mail-1.hdr")));
-            Assert.Equal(Encoding.ASCII.GetBytes(expectedEml), File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "mail-1.eml")));
+            Assert.Equal(Encoding.ASCII.GetBytes(expectedHdr), File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "mailc1.hdr")));
+            Assert.Equal(Encoding.ASCII.GetBytes(expectedEml), File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, "mailc1.eml")));
             Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory));
         }
     }

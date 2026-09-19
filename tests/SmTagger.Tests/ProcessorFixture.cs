@@ -71,7 +71,7 @@ internal sealed class ProcessorFixture : IDisposable
     // Opens the same production configuration and tag store with deterministic cryptographic-source test bytes.
     public ProcessorHarness Open(bool keep = false, bool log = false, Action<byte[]>? random = null)
     {
-        var trace = TraceLog.Open(DataDirectory, log, Errors);
+        var trace = TraceLog.Open(log ? Path.Combine(DataDirectory, "log.txt") : null, stderr: Errors);
         try
         {
             var configuration = SenderConfiguration.Load(DataDirectory, trace);

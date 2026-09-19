@@ -78,6 +78,16 @@ public sealed class SorterFailedRetentionTests
         };
         Assert.Contains("operation=" + ConsoleErrors.Quote(operation), Assert.Single(fixture.Records()));
 
+        string stderr = fixture.Tree.Errors.ToString();
+        const string errorField = "\r\nerror=";
+        int errorStart = stderr.IndexOf(errorField, StringComparison.Ordinal);
+        Assert.True(errorStart >= 0);
+        string exceptionText = stderr[(errorStart + errorField.Length)..].TrimEnd('\r', '\n');
+        Assert.Contains(Environment.NewLine + "   at ", exceptionText);
+        string[] diagnosticLines = File.ReadAllLines(fixture.Tree.Input("rejected.sort.err"));
+        Assert.Equal(8, diagnosticLines.Length);
+        Assert.Equal("error=" + ConsoleErrors.Quote(exceptionText), diagnosticLines[^1]);
+
         fixture.Tree.AddMessage("later");
         Assert.Equal(MessageOutcome.Succeeded, fixture.Processor.Process("later", watchMode: true));
         Assert.Equal(2, fixture.Records().Length);

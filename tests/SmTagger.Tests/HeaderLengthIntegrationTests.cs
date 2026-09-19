@@ -19,7 +19,7 @@ public sealed class HeaderLengthIntegrationTests
         Assert.Single(harness.Tags.Mappings);
         if (success)
         {
-            var from = File.ReadAllLines(Path.Combine(fixture.SpoolDirectory, "mail-1.eml"))
+            var from = File.ReadAllLines(Path.Combine(fixture.SpoolDirectory, "mailc1.eml"))
                 .Single(line => line.StartsWith("From:", StringComparison.Ordinal));
             Assert.Equal(998, Encoding.ASCII.GetByteCount(from));
             Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory));
@@ -32,7 +32,7 @@ public sealed class HeaderLengthIntegrationTests
             var diagnostic = File.ReadAllText(Path.Combine(fixture.ProcessDirectory, "mail.err"));
             Assert.Contains("999", diagnostic);
             Assert.Contains("998", diagnostic);
-            Assert.Contains("mail-1", diagnostic);
+            Assert.Contains("mailc1", diagnostic);
             Assert.False(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail.hdr.err")));
         }
     }
@@ -68,18 +68,18 @@ public sealed class HeaderLengthIntegrationTests
         {
             Assert.Equal(MessageOutcome.Failed, harness.Processor.Process("mail"));
             Assert.Equal(2, harness.Tags.Mappings.Count);
-            Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-1.hdr.pend")));
-            Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-1.eml.pend")));
-            Assert.False(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-2.hdr.pend")));
+            Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc1.hdr.pend")));
+            Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc1.eml.pend")));
+            Assert.False(File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc2.hdr.pend")));
             Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
-            Assert.Contains("mail-2", File.ReadAllText(Path.Combine(fixture.ProcessDirectory, "mail.err")));
+            Assert.Contains("mailc2", File.ReadAllText(Path.Combine(fixture.ProcessDirectory, "mail.err")));
         }
 
         using var restarted = fixture.Open(random: _ => throw new InvalidOperationException("must reuse mapping"));
         fixture.WriteMessage("fresh", ProcessorFixture.Header("bob@example.net"));
         Assert.Equal(MessageOutcome.Succeeded, restarted.Processor.Process("fresh"));
-        Assert.Contains(longTag, File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "fresh-1.eml")));
-        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mail-1.hdr.pend")));
+        Assert.Contains(longTag, File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "freshc1.eml")));
+        Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "mailc1.hdr.pend")));
     }
 
     // Reloads and reuses a newly published mapping after its first message fails the output-length contract.
@@ -108,11 +108,11 @@ public sealed class HeaderLengthIntegrationTests
         fixture.WriteMessage("fresh");
         Assert.Equal(MessageOutcome.Succeeded, restarted.Processor.Process("fresh"));
         Assert.Single(restarted.Tags.Mappings);
-        Assert.Contains(allocatedTag, File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "fresh-1.eml")));
+        Assert.Contains(allocatedTag, File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "freshc1.eml")));
         Assert.Equal(originals.Hdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "mail.hdr.break")));
         Assert.Equal(originals.Eml, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "mail.eml.break")));
-        Assert.False(File.Exists(Path.Combine(fixture.SpoolDirectory, "mail-1.hdr")));
-        Assert.Equal(new[] { "20260905T123456Z fresh-1" },
+        Assert.False(File.Exists(Path.Combine(fixture.SpoolDirectory, "mailc1.hdr")));
+        Assert.Equal(new[] { "20260905T123456Z freshc1" },
             File.ReadAllLines(Path.Combine(fixture.DataDirectory, "tag-addresses", allocatedTag, "tag-log.txt")));
     }
 
@@ -141,7 +141,7 @@ public sealed class HeaderLengthIntegrationTests
         fixture.WriteMessage("mail", eml: ProcessorFixture.Message(extra: opaque, body: body));
         using var harness = fixture.Open();
         Assert.Equal(MessageOutcome.Succeeded, harness.Processor.Process("mail"));
-        var output = File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "mail-1.eml"));
+        var output = File.ReadAllText(Path.Combine(fixture.SpoolDirectory, "mailc1.eml"));
         Assert.Contains(opaque, output);
         Assert.EndsWith(body, output);
     }

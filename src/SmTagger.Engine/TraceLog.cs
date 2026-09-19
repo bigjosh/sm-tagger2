@@ -1,88 +1,126 @@
 using System.Globalization;
 using System.Text;
+using SmTagger.Shared;
 
 namespace SmTagger.Engine;
 
-/// <summary>Best-effort operational diagnostics, with a once-opened invocation trace.</summary>
+/// <summary>Best-effort operational diagnostics, with independent invocation file and console traces.</summary>
 public sealed class TraceLog : IDisposable
 {
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
-    private readonly string path;
+    private readonly string? path;
     private readonly TextWriter stderr;
+    private readonly TextWriter stdout;
     private readonly Func<DateTimeOffset> clock;
     private readonly Func<string, FileMode, Stream> openLog;
     private string runId = string.Empty;
     private Stream? stream;
+    private bool verbose;
     private long sequence;
 
     public bool IsEnabled => stream is not null;
+    public bool IsVerbose => verbose;
 
     // Retain the logging dependencies without opening or mutating the data tree.
-    private TraceLog(string dataDir, TextWriter stderr, Func<DateTimeOffset> clock,
+    private TraceLog(string? logPath, bool verbose, TextWriter stderr, TextWriter stdout, Func<DateTimeOffset> clock,
         Func<string, FileMode, Stream> openLog)
     {
-        path = Path.Combine(dataDir, "log.txt");
+        path = logPath;
+        this.verbose = verbose;
         this.stderr = stderr;
+        this.stdout = stdout;
         this.clock = clock;
         this.openLog = openLog;
     }
 
-    // Attempt the optional trace once; its failure never prevents normal startup.
-    public static TraceLog Open(string dataDir, bool enabled, TextWriter? stderr = null,
-        Func<DateTimeOffset>? clock = null) => OpenCore(dataDir, enabled, stderr ?? Console.Error,
-            clock ?? (() => DateTimeOffset.UtcNow), OpenFile, Guid.NewGuid);
+    // Attempt only an explicitly requested file once while retaining independent optional console tracing.
+    public static TraceLog Open(string? logPath, bool verbose = false, TextWriter? stderr = null,
+        TextWriter? stdout = null, Func<DateTimeOffset>? clock = null) => OpenCore(logPath, verbose,
+            stderr ?? Console.Error, stdout ?? Console.Out, clock ?? (() => DateTimeOffset.UtcNow), OpenFile, Guid.NewGuid);
 
     // Provide a narrow stream seam for write, flush, and disposal failure tests.
-    internal static TraceLog OpenForTesting(string dataDir, bool enabled, TextWriter stderr,
-        Func<DateTimeOffset> clock, Func<string, FileMode, Stream> openLog, Func<Guid>? runUuid = null) =>
-        OpenCore(dataDir, enabled, stderr, clock, openLog, runUuid ?? Guid.NewGuid);
+    internal static TraceLog OpenForTesting(string? logPath, bool verbose, TextWriter stderr,
+        Func<DateTimeOffset> clock, Func<string, FileMode, Stream> openLog, Func<Guid>? runUuid = null,
+        TextWriter? stdout = null) =>
+        OpenCore(logPath, verbose, stderr, stdout ?? Console.Out, clock, openLog, runUuid ?? Guid.NewGuid);
 
-    // Open an invocation trace using the selected file operation.
-    private static TraceLog OpenCore(string dataDir, bool enabled, TextWriter stderr,
+    // Initialize one shared event identity before independently opening the requested file sink.
+    private static TraceLog OpenCore(string? logPath, bool verbose, TextWriter stderr, TextWriter stdout,
         Func<DateTimeOffset> clock, Func<string, FileMode, Stream> openLog, Func<Guid> runUuid)
     {
-        var trace = new TraceLog(dataDir, stderr, clock, openLog);
-        if (enabled)
+        var trace = new TraceLog(logPath, verbose, stderr, stdout, clock, openLog);
+        if (logPath is not null || verbose)
         {
-            try
+            try { trace.runId = runUuid().ToString("D"); }
+            catch (Exception exception)
             {
-                trace.runId = runUuid().ToString("D");
-                trace.stream = openLog(trace.path, FileMode.Append);
+                if (logPath is not null)
+                    trace.ReportLoggingFailure(logPath, "initialize", exception);
+                trace.DisableConsole(exception);
+                return trace;
             }
-            catch (Exception exception) { trace.ReportLoggingFailure(trace.path, "initialize/open", exception); }
+        }
+        if (logPath is not null)
+        {
+            try { trace.stream = openLog(logPath, FileMode.Append); }
+            catch (Exception exception) { trace.ReportLoggingFailure(logPath, "open", exception); }
         }
         return trace;
     }
 
-    // Append one fully formatted UTF-8 event and disable only this trace on any failure.
+    // Prepare each event value once and render independent file and readable console representations.
     public void Event(string context, string eventName, string result,
         params (string Name, object? Value)[] details)
     {
-        if (stream is null)
+        if (stream is null && !verbose)
             return;
+        string line;
+        string? consoleLine;
         try
         {
             sequence++;
             RequireToken(eventName);
             RequireToken(result);
             string timestamp = clock().ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
-            var text = new StringBuilder(timestamp).Append(" run=").Append(runId)
-                .Append(" seq=").Append(sequence.ToString(CultureInfo.InvariantCulture))
-                .Append(" context=").Append(Quote(context)).Append(" event=").Append(eventName)
-                .Append(" result=").Append(result);
+            string prefix = timestamp + " run=" + runId + " seq=" + sequence.ToString(CultureInfo.InvariantCulture);
+            var text = new StringBuilder(prefix).Append(" context=").Append(Quote(context))
+                .Append(" event=").Append(eventName).Append(" result=").Append(result);
+            StringBuilder? consoleText = verbose ? new StringBuilder(prefix).Append(" context=")
+                .Append(Quote(context, forConsole: true)).Append(" event=").Append(eventName).Append(" result=").Append(result) : null;
             foreach ((string name, object? value) in details)
             {
                 RequireFieldName(name);
-                text.Append(' ').Append(name).Append('=').Append(FormatValue(value));
+                (string fileValue, string consoleValue) = FormatValues(value);
+                text.Append(' ').Append(name).Append('=').Append(fileValue);
+                consoleText?.Append(' ').Append(name).Append('=').Append(consoleValue);
             }
-            text.Append("\r\n");
-            byte[] bytes = StrictUtf8.GetBytes(text.ToString());
-            stream.Write(bytes);
-            stream.Flush();
+            line = text.ToString();
+            consoleLine = consoleText?.ToString();
         }
         catch (Exception exception)
         {
-            Disable(context, eventName, exception);
+            DisableFile(context, eventName, exception);
+            DisableConsole(exception);
+            return;
+        }
+        if (stream is not null)
+        {
+            try
+            {
+                byte[] bytes = StrictUtf8.GetBytes(line + "\r\n");
+                stream.Write(bytes);
+                stream.Flush();
+            }
+            catch (Exception exception) { DisableFile(context, eventName, exception); }
+        }
+        if (verbose)
+        {
+            try
+            {
+                stdout.WriteLine("DEBUG " + consoleLine);
+                stdout.Flush();
+            }
+            catch (Exception exception) { DisableConsole(exception); }
         }
     }
 
@@ -107,15 +145,16 @@ public sealed class TraceLog : IDisposable
         }
     }
 
-    // Emit one protected stderr line; stderr failure deliberately has no recursive fallback.
+    // Emit protected scalar context and a readable multiline exception; stderr has no recursive fallback.
     public void ReportError(string message, Exception? exception = null)
     {
         try
         {
             string prefix = message.StartsWith("ERROR", StringComparison.Ordinal) || message.StartsWith("WARNING", StringComparison.Ordinal)
                 ? "" : "ERROR ";
-            string reason = exception is null ? "" : " exception=" + Quote(exception.ToString());
+            string reason = exception is null ? "" : Environment.NewLine + ConsoleErrors.FormatException(exception);
             stderr.WriteLine(prefix + SingleLine(message) + reason);
+            stderr.Flush();
         }
         catch (Exception) { }
     }
@@ -128,7 +167,7 @@ public sealed class TraceLog : IDisposable
         {
             var text = new StringBuilder(SingleLine(reason)).Append("\r\n");
             foreach ((string name, object? value) in details)
-                text.Append(SingleLine(name)).Append('=').Append(FormatValue(value)).Append("\r\n");
+                text.Append(SingleLine(name)).Append('=').Append(FormatValues(value).File).Append("\r\n");
             byte[] bytes = StrictUtf8.GetBytes(text.ToString());
             Event("-", "STATE_INTENT", "ATTEMPT", ("operation", "create"), ("destination", diagnosticPath));
             using (var diagnostic = new FileStream(diagnosticPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
@@ -142,7 +181,7 @@ public sealed class TraceLog : IDisposable
         {
             Event("-", "STATE_RESULT", "ERROR", ("operation", "create"), ("destination", diagnosticPath),
                 ("error", exception), ("residual", "UNKNOWN"));
-            try { ReportError($"Cannot write diagnostic {Quote(diagnosticPath)}", exception); }
+            try { ReportError($"Cannot write diagnostic {Quote(diagnosticPath, forConsole: true)}", exception); }
             catch (Exception) { }
         }
     }
@@ -172,59 +211,82 @@ public sealed class TraceLog : IDisposable
     // Report a log failure with the stable searchable prefix required by the specification.
     internal void ReportLoggingFailure(string logPath, string operation, Exception exception)
     {
-        try { ReportError($"ERROR logging to {Quote(logPath)}: {operation}", exception); }
+        try { ReportError($"ERROR logging to {Quote(logPath, forConsole: true)}: {operation}", exception); }
         catch (Exception) { }
     }
 
     // Quote arbitrary values without allowing diagnostic line injection or malformed UTF-8.
-    public static string Quote(string value)
+    public static string Quote(string value) => Quote(value, forConsole: false);
+
+    // Retain scalar controls on one line while allowing normal path spelling in console output.
+    private static string Quote(string value, bool forConsole)
     {
         var text = new StringBuilder(value.Length + 2).Append('"');
-        AppendEscaped(text, value, quote: true);
+        AppendEscaped(text, value, quote: true, escapeBackslashes: !forConsole);
         return text.Append('"').ToString();
     }
 
     // Close a trace without converting cleanup trouble into a mail-processing failure.
     public void Dispose()
     {
+        verbose = false;
         Stream? acquired = stream;
         stream = null;
         if (acquired is null)
             return;
         try { acquired.Dispose(); }
-        catch (Exception exception) { ReportLoggingFailure(path, "close", exception); }
+        catch (Exception exception) { ReportLoggingFailure(path!, "close", exception); }
     }
 
     // Permanently detach the failed stream before attempting its best-effort cleanup.
-    private void Disable(string context, string eventName, Exception exception)
+    private void DisableFile(string context, string eventName, Exception exception)
     {
         Stream? failed = stream;
         stream = null;
-        try { ReportLoggingFailure(path, $"event={eventName} context={Quote(context)}", exception); }
+        if (failed is null)
+            return;
+        try { ReportLoggingFailure(path!, $"event={eventName} context={Quote(context, forConsole: true)}", exception); }
         catch (Exception) { }
         try { failed?.Dispose(); }
-        catch (Exception cleanupException) { ReportLoggingFailure(path, "close failed trace", cleanupException); }
+        catch (Exception cleanupException) { ReportLoggingFailure(path!, "close failed trace", cleanupException); }
+    }
+
+    // Detach failed console output without closing the caller's writer or affecting file tracing.
+    private void DisableConsole(Exception exception)
+    {
+        if (!verbose)
+            return;
+        verbose = false;
+        ReportError("ERROR writing tagger debug output:", exception);
     }
 
     // Use append/create modes with read sharing; existing bytes are never read or repaired.
     private static Stream OpenFile(string filePath, FileMode mode) =>
         new FileStream(filePath, mode, FileAccess.Write, FileShare.Read);
 
-    // Keep integer details searchable while quoting all arbitrary strings and other values.
-    private static string FormatValue(object? value) => value switch
+    // Convert values only once, retaining file escaping while displaying exception line breaks on the console.
+    private static (string File, string Console) FormatValues(object? value)
     {
-        null => Quote(""),
-        byte or sbyte or short or ushort or int or uint or long or ulong => Convert.ToString(value, CultureInfo.InvariantCulture)!,
-        bool boolean => boolean ? "TRUE" : "FALSE",
-        byte[] bytes => QuoteBytes(bytes),
-        ReadOnlyMemory<byte> bytes => QuoteBytes(bytes.Span),
-        IEnumerable<string> strings => Quote(string.Join(",", strings)),
-        IEnumerable<int> integers => Quote(string.Join(",", integers.Select(integer => integer.ToString(CultureInfo.InvariantCulture)))),
-        _ => Quote(Convert.ToString(value, CultureInfo.InvariantCulture) ?? "")
-    };
+        if (value is byte or sbyte or short or ushort or int or uint or long or ulong or bool)
+        {
+            string literal = value is bool boolean ? boolean ? "TRUE" : "FALSE" : Convert.ToString(value, CultureInfo.InvariantCulture)!;
+            return (literal, literal);
+        }
+        if (value is byte[] bytes)
+            return (QuoteBytes(bytes), QuoteBytes(bytes, forConsole: true));
+        if (value is ReadOnlyMemory<byte> memory)
+            return (QuoteBytes(memory.Span), QuoteBytes(memory.Span, forConsole: true));
+        string text = value switch
+        {
+            IEnumerable<string> strings => string.Join(",", strings),
+            IEnumerable<int> integers => string.Join(",", integers.Select(integer => integer.ToString(CultureInfo.InvariantCulture))),
+            _ => Convert.ToString(value, CultureInfo.InvariantCulture) ?? ""
+        };
+        return (Quote(text), value is Exception ? text : Quote(text, forConsole: true));
+    }
 
     // Retain invalid raw bytes explicitly while preserving complete valid UTF-8 sequences.
-    private static string QuoteBytes(ReadOnlySpan<byte> bytes)
+    private static string QuoteBytes(ReadOnlySpan<byte> bytes, bool forConsole = false)
     {
         var text = new StringBuilder().Append('"');
         ReadOnlySpan<byte> remaining = bytes;
@@ -233,7 +295,7 @@ public sealed class TraceLog : IDisposable
             System.Buffers.OperationStatus status = Rune.DecodeFromUtf8(remaining, out Rune rune, out int consumed);
             if (status == System.Buffers.OperationStatus.Done)
             {
-                AppendEscaped(text, rune.ToString(), quote: true);
+                AppendEscaped(text, rune.ToString(), quote: true, escapeBackslashes: !forConsole);
                 remaining = remaining[consumed..];
             }
             else
@@ -254,7 +316,7 @@ public sealed class TraceLog : IDisposable
     }
 
     // Escape controls and malformed surrogate code units while retaining valid Unicode text.
-    private static void AppendEscaped(StringBuilder text, string value, bool quote)
+    private static void AppendEscaped(StringBuilder text, string value, bool quote, bool escapeBackslashes = true)
     {
         for (int index = 0; index < value.Length; index++)
         {
@@ -264,7 +326,7 @@ public sealed class TraceLog : IDisposable
                 case '\r': text.Append("\\r"); break;
                 case '\n': text.Append("\\n"); break;
                 case '\t': text.Append("\\t"); break;
-                case '\\' when quote: text.Append("\\\\"); break;
+                case '\\' when quote && escapeBackslashes: text.Append("\\\\"); break;
                 case '"' when quote: text.Append("\\\""); break;
                 default:
                     if (char.IsControl(character))

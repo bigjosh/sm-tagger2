@@ -13,7 +13,8 @@ public sealed class QueueWatcherTests
         using SorterTestDirectory tree = new();
         string otherExtension = inputExtension == ".hdr" ? ".eml" : ".hdr";
         foreach (string filename in new[] { "z" + inputExtension, "a" + inputExtension.ToUpperInvariant(),
-            "B" + inputExtension, "ignored" + inputExtension + ".start", "ignored" + inputExtension + "x", "orphan" + otherExtension })
+            "B" + inputExtension, "ignored" + inputExtension + ".start", "ignored" + inputExtension + "x", "orphan" + otherExtension,
+            "42615432-1" + inputExtension + ".pend", "42615432c1" + inputExtension + ".pend" })
         {
             File.WriteAllText(tree.Input(filename), "fixture");
         }
@@ -42,6 +43,8 @@ public sealed class QueueWatcherTests
         Assert.Equal(["B", "a", "z"], Assert.Single(scans));
         Assert.Equal("queued working fixture", File.ReadAllText(tree.Work("process/child" + inputExtension)));
         Assert.Equal("retained working fixture", File.ReadAllText(tree.Work("failed/child" + inputExtension)));
+        Assert.Equal("fixture", File.ReadAllText(tree.Input("42615432-1" + inputExtension + ".pend")));
+        Assert.Equal("fixture", File.ReadAllText(tree.Input("42615432c1" + inputExtension + ".pend")));
     }
 
     // A stop recorded before discovery prevents any initial message claim.

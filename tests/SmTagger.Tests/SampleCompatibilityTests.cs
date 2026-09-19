@@ -110,7 +110,7 @@ public sealed class SampleCompatibilityTests
                 string? firstReplyTag = null;
                 for (int index = 0; index < recipients.Count; index++)
                 {
-                    string basename = "capture-" + (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    string basename = "capturec" + (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
                     byte[] outputBytes = File.ReadAllBytes(fixture.Spool(basename + ".eml"));
                     EmlDocument output = EmlDocument.Parse(outputBytes);
                     HdrDocument childHdr = HdrDocument.Parse(File.ReadAllBytes(fixture.Spool(basename + ".hdr")));
@@ -251,7 +251,7 @@ internal sealed class LocalSampleFixture : IDisposable
     // Open production configuration, mapping, and processing code with deterministic test-only token bytes.
     public ProcessorHarness Open()
     {
-        TraceLog trace = TraceLog.Open(dataDirectory, enabled: false, errors);
+        TraceLog trace = TraceLog.Open(null, stderr: errors);
         try
         {
             SenderConfiguration configuration = SenderConfiguration.Load(dataDirectory, trace);

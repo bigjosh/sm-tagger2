@@ -31,24 +31,28 @@ public static class Program
             // VERSION-SENSITIVE-001: SmarterMail leaves our nested Proc workspace to the external processors.
             Directory.CreateDirectory(MailQueuePaths.WorkDirectory(invocation.SpoolDirectory));
             using var queueSingleton = SingletonLock.Acquire(MailQueuePaths.TaggerLockPath(invocation.SpoolDirectory));
-            using var trace = TraceLog.Open(invocation.DataDirectory, invocation.Log);
+            using var trace = TraceLog.Open(invocation.LogPath, invocation.Verbose);
             trace.Event("-", "STARTUP", "BEGIN", ("dataDirectory", invocation.DataDirectory),
                 ("spoolDirectory", invocation.SpoolDirectory), ("basename", invocation.Basename),
-                ("keep", invocation.Keep), ("watch", invocation.IsWatchMode));
+                ("keep", invocation.Keep), ("watch", invocation.IsWatchMode),
+                ("logfile", invocation.LogPath), ("verbose", invocation.Verbose));
+            var concise = new ConciseOutput(invocation.Concise);
+            concise.Welcome("sm-tagger", invocation);
             try
             {
                 var configuration = SenderConfiguration.Load(invocation.DataDirectory, trace);
                 var tags = TagStore.Load(invocation.DataDirectory, configuration, trace);
+                concise.Loaded(configuration.Profiles.Count, tags.Mappings.Count);
                 var processDirectory = MailQueuePaths.ProcessDirectory(invocation.SpoolDirectory);
                 trace.Transition("-", "create-directory", null, processDirectory,
                     () => Directory.CreateDirectory(processDirectory));
                 var processor = new TaggerProcessor(invocation.SpoolDirectory,
-                    configuration, tags, trace, invocation.Keep);
+                    configuration, tags, trace, invocation.Keep, concise);
                 return Run(invocation, processor, trace);
             }
             catch (Exception exception)
             {
-                trace.Event("-", "FATAL", "ERROR", ("exception", ConsoleErrors.FormatException(exception)));
+                trace.Event("-", "FATAL", "ERROR", ("exception", exception));
                 throw;
             }
         }

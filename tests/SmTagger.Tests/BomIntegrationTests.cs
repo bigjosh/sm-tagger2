@@ -53,7 +53,7 @@ public sealed class BomIntegrationTests
             string reply = groupTag is null ? "" : from.Replace("From:", "Reply-To:", StringComparison.Ordinal)
                 .Replace(ProcessorFixture.Private, groupTag, StringComparison.Ordinal);
             byte[] expected = WithBom(from.Replace(ProcessorFixture.Private, individual, StringComparison.Ordinal) + reply + tail, body);
-            string child = "mail-" + (index + 1);
+            string child = "mailc" + (index + 1);
             Assert.Equal(expected, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, child + ".eml")));
             Assert.Equal(expected, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, child + ".eml.out")));
         }
@@ -96,7 +96,7 @@ public sealed class BomIntegrationTests
         Assert.Equal(MessageOutcome.Failed, harness.Processor.Process("mail"));
         Assert.Empty(harness.Tags.Mappings);
         Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
-        Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory, "mail-*"));
+        Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory, "mailc*"));
         Assert.Equal(original, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "mail.eml.start")));
         Assert.Equal(originalPair.Hdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "mail.hdr.start")));
         Assert.Contains("message-disposition notifications are disabled", File.ReadAllText(Path.Combine(fixture.ProcessDirectory, "mail.err")));
@@ -115,7 +115,7 @@ public sealed class BomIntegrationTests
         Assert.Equal(MessageOutcome.Failed, harness.Processor.Process("mail"));
         Assert.Empty(harness.Tags.Mappings);
         Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
-        Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory, "mail-*"));
+        Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory, "mailc*"));
         Assert.Equal(original, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "mail.eml.err")));
         Assert.Equal(originalPair.Hdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "mail.hdr.err")));
         string diagnostic = File.ReadAllText(Path.Combine(fixture.ProcessDirectory, "mail.err"));
@@ -139,7 +139,7 @@ public sealed class BomIntegrationTests
         Assert.Equal(MessageOutcome.Failed, harness.Processor.Process("mail"));
         Assert.Empty(harness.Tags.Mappings);
         Assert.Empty(Directory.GetFiles(fixture.SpoolDirectory));
-        Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory, "mail-*"));
+        Assert.Empty(Directory.GetFiles(fixture.ProcessDirectory, "mailc*"));
         Assert.Equal(original, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "mail.eml.start")));
         Assert.Equal(originalPair.Hdr, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "mail.hdr.start")));
         Assert.Equal(original, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, "mail.eml.in")));

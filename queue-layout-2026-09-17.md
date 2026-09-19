@@ -1,5 +1,7 @@
 # Mail workspace — rc.10 migration
 
+**Historical option scope:** this guide records the rc.10 queue conversion and its datadir trace location. The same queue conversion applies when upgrading older installations to rc.11, but tagger launchers must use explicit `-l <logfile>` (optionally `-v`); see the [current CLI upgrade note](README.md#tagger-cli-upgrade). Preserve earlier logs in place and back up selected external log locations separately. An existing rc.10 layout needs no new queue move.
+
 Local candidate **1.0.0-rc.10** moves mail working state from the datadir into a fixed workspace beneath the selected SmarterMail Proc directory. The authoritative [runtime trees](storage-reference.md#runtime-directory-trees), [creation rules](storage-reference.md#required-directories-and-creation), and [lock locations](storage-reference.md#locks) define the current layout; this document describes only the offline conversion and rollback.
 
 Configuration, permanent mappings, mapping staging, and `log.txt` stay in the datadir. The data volume may differ from the mail volume, provided each mapping/auth-index publication stays on its required data volume. All mail moves stay on the spool's ordinary local NTFS volume without junctions. The tagger acquires the existing data lock first, creates the fixed mailroot, then acquires its queue lock before trace/configuration/message work. Both locks remain held for the invocation, preventing conflicts through either datadir or spool.

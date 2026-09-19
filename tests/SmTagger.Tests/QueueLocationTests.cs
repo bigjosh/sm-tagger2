@@ -39,7 +39,7 @@ public sealed class QueueLocationTests
         File.WriteAllBytes(logPath, log);
         string[] configuration = ConfigurationSnapshot(fixture);
 
-        Assert.Equal(1, SmTagger.Program.Main([fixture.DataDirectory, "-log", fixture.SpoolDirectory, "queued"]));
+        Assert.Equal(1, SmTagger.Program.Main([fixture.DataDirectory, "-l", Path.Combine(fixture.DataDirectory, "log.txt"), fixture.SpoolDirectory, "queued"]));
 
         Assert.Equal(log, File.ReadAllBytes(logPath));
         Assert.Equal(configuration, ConfigurationSnapshot(fixture));
@@ -83,7 +83,7 @@ public sealed class QueueLocationTests
         Assert.Equal(MessageOutcome.Succeeded, sorter.Process("fresh"));
         Assert.True(File.Exists(Path.Combine(fixture.ProcessDirectory, "fresh.hdr")));
         Assert.Equal(0, SmTagger.Program.Main([fixture.DataDirectory, fixture.SpoolDirectory, "fresh"]));
-        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "fresh-1.hdr")));
+        Assert.True(File.Exists(Path.Combine(fixture.SpoolDirectory, "freshc1.hdr")));
 
         byte[] failedHdr = "Failed\r\nnew retained metadata"u8.ToArray();
         byte[] failedEml = [42, 13, 10];
@@ -120,7 +120,7 @@ public sealed class QueueLocationTests
         using (SingletonLock ownerData = SingletonLock.Acquire(Path.Combine(owner.DataDirectory, "sm-tagger.lock")))
         using (SingletonLock ownerQueue = SingletonLock.Acquire(Path.Combine(owner.WorkDirectory, "sm-tagger.lock")))
         {
-            Assert.Equal(1, SmTagger.Program.Main([data, "-log", spool, "queued"]));
+            Assert.Equal(1, SmTagger.Program.Main([data, "-l", logPath, spool, "queued"]));
             Assert.Equal(log, File.ReadAllBytes(logPath));
             Assert.Equal(original.Hdr, File.ReadAllBytes(Path.Combine(queue.ProcessDirectory, "queued.hdr")));
             Assert.Equal(original.Eml, File.ReadAllBytes(Path.Combine(queue.ProcessDirectory, "queued.eml")));
@@ -137,8 +137,8 @@ public sealed class QueueLocationTests
             }
         }
 
-        Assert.Equal(0, SmTagger.Program.Main([data, "-log", spool, "queued"]));
-        Assert.True(File.Exists(Path.Combine(spool, "queued-1.hdr")));
+        Assert.Equal(0, SmTagger.Program.Main([data, "-l", logPath, spool, "queued"]));
+        Assert.True(File.Exists(Path.Combine(spool, "queuedc1.hdr")));
         Assert.Empty(Directory.GetFiles(queue.ProcessDirectory));
         using SingletonLock releasedData = SingletonLock.Acquire(Path.Combine(data, "sm-tagger.lock"));
         using SingletonLock releasedQueue = SingletonLock.Acquire(Path.Combine(queue.WorkDirectory, "sm-tagger.lock"));

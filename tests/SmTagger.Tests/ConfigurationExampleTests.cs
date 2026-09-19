@@ -19,7 +19,7 @@ public sealed class ConfigurationExampleTests
         Assert.True(Directory.Exists(Path.Combine(dataDirectory, "senders", "auth-addresses", "auth@example.com")));
         Assert.True(Directory.Exists(Path.Combine(dataDirectory, "senders", "sender-ids",
             "22222222-2222-4222-8222-222222222222")));
-        using var trace = TraceLog.Open(dataDirectory, enabled: false);
+        using var trace = TraceLog.Open(null);
         SenderConfiguration configuration = SenderConfiguration.Load(dataDirectory, trace);
         SenderProfile profile = Assert.Single(configuration.Profiles).Value;
         Assert.Same(profile, configuration.Resolve("auth@example.com"));

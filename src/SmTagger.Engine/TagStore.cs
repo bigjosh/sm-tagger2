@@ -92,6 +92,13 @@ public sealed class TagStore
     // Reuse a live mapping or atomically publish one complete identity with at most sixteen token proposals.
     public TagMapping GetOrCreate(SenderProfile profile, string recipientId, string context)
     {
+        return GetOrCreate(profile, recipientId, context, out _);
+    }
+
+    // Reports allocation for this lookup only after its permanent mapping is live and available in memory.
+    public TagMapping GetOrCreate(SenderProfile profile, string recipientId, string context, out bool created)
+    {
+        created = false;
         // VERSION-SENSITIVE-009: The approved sending route accepts new tags without per-address provisioning.
         // Construct the authoritative key before any live filesystem publication.
         var key = (profile.SenderId, recipientId);
@@ -153,6 +160,7 @@ public sealed class TagStore
             }
             trace.Event(context, "MAPPING_AVAILABLE", "OK", ("senderId", profile.SenderId),
                 ("recipientId", recipientId), ("tagAddress", tagAddress), ("path", final));
+            created = true;
             return mapping;
         }
         throw new InvalidOperationException("The bounded proposal loop ended without an outcome.");

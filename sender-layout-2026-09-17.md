@@ -1,6 +1,6 @@
 # Sender-directory layout — rc.8
 
-Current rc.10 additionally requires [offline queue relocation](queue-layout-2026-09-17.md). When upgrading from an earlier version, perform the relevant directory/configuration conversions below while stopped, then complete that relocation before starting current binaries. The original rc.8 evidence and paths below remain historical.
+The rc.10 and later layout additionally requires [offline queue relocation](queue-layout-2026-09-17.md). When upgrading from an earlier version, perform the relevant directory/configuration conversions below while stopped, then complete that relocation before starting current binaries. The original rc.8 evidence and paths below remain historical.
 
 **Historical procedure: rc.7 to rc.8 only.** The path moves and evidence below retain their original scope. Current rc.9 additionally removes former auth/retirement metadata and treats every published index as active; follow [rc.9 configuration conversion](sender-configuration-2026-09-17.md) before running current binaries. When starting from rc.7 or earlier, perform the directory moves below offline, then complete the rc.9 review without starting the intermediate configuration. Instructions below to preserve retired indexes and start rc.8 are not the final rc.9 cutover procedure.
 

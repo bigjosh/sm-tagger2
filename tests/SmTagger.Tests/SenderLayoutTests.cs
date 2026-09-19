@@ -31,7 +31,7 @@ public sealed class SenderLayoutTests
     {
         using SorterTestDirectory tree = new();
         Directory.CreateDirectory(tree.Data("senders/" + presentRoot));
-        using TraceLog trace = TraceLog.Open(tree.Data(""), enabled: false, stderr: tree.Errors);
+        using TraceLog trace = TraceLog.Open(null, stderr: tree.Errors);
 
         StartupConfigurationException error = Assert.Throws<StartupConfigurationException>(() =>
             SenderConfiguration.Load(tree.Data(""), trace));

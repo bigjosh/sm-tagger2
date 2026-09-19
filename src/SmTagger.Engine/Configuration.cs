@@ -48,7 +48,7 @@ public sealed class SenderConfiguration
             Array.Sort(authDirectories, StringComparer.Ordinal);
             var profiles = new Dictionary<string, SenderProfile>(StringComparer.Ordinal);
             var authIndexes = new Dictionary<string, SenderProfile>(StringComparer.Ordinal);
-            var allAddresses = new Dictionary<string, string>(StringComparer.Ordinal);
+            var allAddresses = new Dictionary<string, (string SenderId, string Role)>(StringComparer.Ordinal);
 
             foreach (string directory in profileDirectories)
             {
@@ -56,11 +56,13 @@ public sealed class SenderConfiguration
                 ValidateSenderId(senderId, directory);
                 string privateAddress = ReadAddress(Path.Combine(directory, "private-address.txt"));
                 string template = ReadTemplate(Path.Combine(directory, "from-template.txt"));
-                string policy = TrimTerminalNewlines(ReadText(Path.Combine(directory, "allow-mdn.txt")));
-                if (policy is not ("true" or "false"))
-                    throw new StartupConfigurationException($"Invalid allow-mdn.txt in {directory}; expected exactly true or false.");
+                string policy = ReadSetting(Path.Combine(directory, "allow-mdn.txt"));
+                bool allowMdn = policy.Equals("true", StringComparison.OrdinalIgnoreCase);
+                if (!allowMdn && !policy.Equals("false", StringComparison.OrdinalIgnoreCase))
+                    throw new StartupConfigurationException(
+                        $"Invalid allow-mdn.txt in {directory}; expected true or false, ignoring case and surrounding whitespace.");
 
-                var profile = new SenderProfile(senderId, privateAddress, template, policy == "true");
+                var profile = new SenderProfile(senderId, privateAddress, template, allowMdn);
                 AddIdentity(allAddresses, privateAddress, senderId, "private");
                 profiles.Add(senderId, profile);
                 trace.Event("-", "PROFILE", "OK", ("senderId", senderId),
@@ -125,15 +127,19 @@ public sealed class SenderConfiguration
     }
 
     // Tolerate undecodable annotations while the parser still rejects non-ASCII template-token characters.
-    private static string ReadTemplate(string path) => ParseTemplate(Encoding.UTF8.GetString(File.ReadAllBytes(path)));
+    private static string ReadTemplate(string path) =>
+        ParseTemplate(Encoding.UTF8.GetString(File.ReadAllBytes(path)).TrimStart('\uFEFF'));
 
     // Read strict UTF-8 without hiding a BOM or replacing corrupted identity bytes.
     internal static string ReadText(string path) => StrictUtf8.GetString(File.ReadAllBytes(path));
 
+    // Allow editor-added leading BOM characters and outer whitespace only in human-edited settings.
+    private static string ReadSetting(string path) => ReadText(path).TrimStart('\uFEFF').Trim();
+
     // Accept only terminal CR/LF in single-value persistent identity files.
     internal static string TrimTerminalNewlines(string text) => text.TrimEnd('\r', '\n');
 
-    // Read and validate one canonical stable sender UUID.
+    // Read one stable opaque sender identifier without changing its spelling.
     internal static string ReadSenderId(string path)
     {
         string value = TrimTerminalNewlines(ReadText(path));
@@ -141,11 +147,11 @@ public sealed class SenderConfiguration
         return value;
     }
 
-    // Reject any noncanonical spelling of the permanent sender identity.
+    // Require only one usable directory component, without imposing a sender-specific format.
     internal static void ValidateSenderId(string value, string location)
     {
-        if (!Guid.TryParseExact(value, "D", out Guid parsed) || parsed.ToString("D") != value)
-            throw new StartupConfigurationException($"Expected a canonical lowercase sender UUID at {location}.");
+        if (!WindowsNames.IsUsableComponent(value))
+            throw new StartupConfigurationException($"Expected a nonempty literal Windows directory name for sender-id at {location}.");
     }
 
     // Report inert evidence without reading its contents or attempting recovery.
@@ -158,14 +164,20 @@ public sealed class SenderConfiguration
         }
     }
 
-    // Parse one address file, preserving strict outer-whitespace handling.
-    private static string ReadAddress(string path) => AddressSyntax.Canonicalize(TrimTerminalNewlines(ReadText(path)));
+    // Parse one configured address after removing harmless editor formatting.
+    private static string ReadAddress(string path) => AddressSyntax.Canonicalize(ReadSetting(path));
 
-    // Enforce one canonical address across every role and every sender profile.
-    private static void AddIdentity(Dictionary<string, string> addresses, string address, string senderId, string role)
+    // Permit shared auth/private roles within one sender while rejecting ownership by another sender.
+    private static void AddIdentity(Dictionary<string, (string SenderId, string Role)> addresses,
+        string address, string senderId, string role)
     {
-        string owner = $"{senderId} ({role})";
-        if (!addresses.TryAdd(address, owner))
-            throw new StartupConfigurationException($"Duplicate identity {address}: {addresses[address]} and {owner}.");
+        if (addresses.TryGetValue(address, out var owner))
+        {
+            if (!string.Equals(owner.SenderId, senderId, StringComparison.Ordinal))
+                throw new StartupConfigurationException(
+                    $"Duplicate identity {address}: {owner.SenderId} ({owner.Role}) and {senderId} ({role}).");
+            return;
+        }
+        addresses.Add(address, (senderId, role));
     }
 }

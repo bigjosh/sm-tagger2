@@ -69,7 +69,7 @@ public sealed class CrashBoundaryTests
         var retainedSpool = Snapshot(fixture.SpoolDirectory);
         string tracePath = Path.Combine(fixture.DataDirectory, "log.txt");
         using (var restarted = Start(typeof(SmTagger.Program).Assembly.Location, fixture,
-            [fixture.DataDirectory, "-log", fixture.SpoolDirectory]))
+            [fixture.DataDirectory, "-l", Path.Combine(fixture.DataDirectory, "log.txt"), fixture.SpoolDirectory]))
         {
             await WaitUntilAsync(() => ReadSharedTrace(tracePath).Contains("event=QUEUE_SCAN result=OK", StringComparison.Ordinal), restarted);
             string[] mappingEvents = ReadSharedTrace(tracePath).Split("\r\n", StringSplitOptions.RemoveEmptyEntries)
@@ -82,7 +82,7 @@ public sealed class CrashBoundaryTests
             AssertSnapshot(retainedSpool, fixture.SpoolDirectory);
 
             PublishFreshPair(fixture, body);
-            await WaitUntilAsync(() => File.Exists(Path.Combine(fixture.SpoolDirectory, "fresh-2.hdr")) &&
+            await WaitUntilAsync(() => File.Exists(Path.Combine(fixture.SpoolDirectory, "freshc2.hdr")) &&
                 !File.Exists(Path.Combine(fixture.ProcessDirectory, "fresh.hdr.break")), restarted);
             Assert.False(restarted.Process.HasExited);
             restarted.Stop();
@@ -111,7 +111,7 @@ public sealed class CrashBoundaryTests
         for (int index = 0; index < recipientIds.Length; index++)
         {
             string individual = final.Tags.Mappings[(ProcessorFixture.SenderId, recipientIds[index])].TagAddress;
-            byte[] output = File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, $"fresh-{index + 1}.eml"));
+            byte[] output = File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, $"freshc{index + 1}.eml"));
             string headers = Encoding.ASCII.GetString(output[..^body.Length]);
             Assert.Contains($"From: \"Fixture Sender\" <{individual}>\r\n", headers);
             Assert.Contains($"Reply-To: \"Fixture Sender\" <{group}>\r\n", headers);
@@ -125,11 +125,11 @@ public sealed class CrashBoundaryTests
         "PARENT_HDR_CLAIMED" => new(".hdr.start", ".eml", [], [], 0, 0),
         "STAGING_READY" => new(".hdr.break", ".eml.break", [], [], 0, 1),
         "MAPPING_PUBLISHED" => new(".hdr.break", ".eml.break", [], [], 1, 0),
-        "CHILD_READY" => new(".hdr.break", ".eml.break", ["crash-1.eml.pend", "crash-1.hdr.pend"], [], 2, 0),
+        "CHILD_READY" => new(".hdr.break", ".eml.break", ["crashc1.eml.pend", "crashc1.hdr.pend"], [], 2, 0),
         "CHILD_EML_PUBLISHED" => new(".hdr.break", ".eml.break",
-            ["crash-1.hdr.pend", "crash-2.eml.pend", "crash-2.hdr.pend"], ["crash-1.eml"], 3, 0),
+            ["crashc1.hdr.pend", "crashc2.eml.pend", "crashc2.hdr.pend"], ["crashc1.eml"], 3, 0),
         "BEFORE_PARENT_CLEANUP" => new(".hdr.break", ".eml.break", [],
-            ["crash-1.eml", "crash-1.hdr", "crash-2.eml", "crash-2.hdr"], 3, 0),
+            ["crashc1.eml", "crashc1.hdr", "crashc2.eml", "crashc2.hdr"], 3, 0),
         "FROM_HDR_RETAINED" => new(".hdr.err", ".eml.start", [], [], 0, 0),
         _ => throw new ArgumentException("Unknown crash-test phase.", nameof(phase))
     };
@@ -206,7 +206,7 @@ public sealed class CrashBoundaryTests
             Assert.True(actual.Remove(path, out string? actualHash), "Retained spool evidence disappeared: " + path);
             Assert.Equal(hash, actualHash);
         }
-        Assert.Equal(new[] { "F|fresh-1.eml", "F|fresh-1.hdr", "F|fresh-2.eml", "F|fresh-2.hdr" }, actual.Keys);
+        Assert.Equal(new[] { "F|freshc1.eml", "F|freshc1.hdr", "F|freshc2.eml", "F|freshc2.hdr" }, actual.Keys);
     }
 
     // Launch either the separate test worker or the production tagger assembly using the installed managed host.

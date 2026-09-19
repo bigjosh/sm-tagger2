@@ -67,7 +67,7 @@ public sealed class BomExecutableTests
                 .Replace(ProcessorFixture.Private, "tag-ccccc@reply.example.com", StringComparison.Ordinal);
             byte[] expected = [0xef, 0xbb, 0xbf,
                 .. Encoding.ASCII.GetBytes(from.Replace(ProcessorFixture.Private, individualTags[index], StringComparison.Ordinal) + reply + tail), .. body];
-            string basename = "bom-" + (index + 1);
+            string basename = "bomc" + (index + 1);
             Assert.Equal(expected, File.ReadAllBytes(Path.Combine(fixture.SpoolDirectory, basename + ".eml")));
             Assert.Equal(expected, File.ReadAllBytes(Path.Combine(fixture.ProcessDirectory, basename + ".eml.out")));
         }
